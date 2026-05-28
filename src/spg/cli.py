@@ -5,6 +5,11 @@ from typing import Sequence
 
 import click as _click
 import rich_click as click
+from rich import box
+from rich.console import Console, Group, RenderableType
+from rich.panel import Panel
+from rich.table import Table
+from rich.text import Text
 
 from spg import __version__
 from spg.completion import (
@@ -71,6 +76,26 @@ click.rich_click.MAX_WIDTH = 100
 
 CONTEXT_SETTINGS = {"help_option_names": ["-h", "--help"]}
 
+# Shared rich consoles. `console` writes to stdout for normal command output;
+# `err_console` writes to stderr for warnings/errors. Both auto-disable styling
+# when output is not a terminal (e.g. piped or captured under pytest).
+console = Console()
+err_console = Console(stderr=True)
+
+
+def _short_path(path: Path | str) -> str:
+    """Render a path with the user's home directory collapsed to ``~``."""
+    text = str(path)
+    try:
+        home = str(Path.home())
+    except (RuntimeError, OSError):
+        return text
+    if text == home:
+        return "~"
+    if text.startswith(home + "/"):
+        return "~" + text[len(home):]
+    return text
+
 
 @click.group(invoke_without_command=True, context_settings=CONTEXT_SETTINGS)
 @click.version_option(__version__, "--version", prog_name="spg", message="%(prog)s %(version)s")
@@ -89,16 +114,16 @@ def init(name_: str | None, directory: str) -> int:
     """Create a starter spg.toml in the current directory."""
     target_dir = Path(directory).resolve()
     if not target_dir.is_dir():
-        click.echo(f"spg: {target_dir} is not a directory", err=True)
+        err_console.print(f"[red]spg:[/] {target_dir} is not a directory")
         return 1
     target = target_dir / PROJECT_CONFIG_FILENAME
     if target.exists():
-        click.echo(f"spg: {target} already exists", err=True)
+        err_console.print(f"[red]spg:[/] {target} already exists")
         return 1
     project_name = name_ or target_dir.name
     target.write_text(STARTER_TEMPLATE.replace("__SPG_NAME__", project_name))
-    click.echo(f"Wrote {target}")
-    click.echo("Edit it to declare commands, then run `spg install`.")
+    console.print(f"[bold green]✓[/] Wrote [bold]{_short_path(target)}[/].")
+    console.print("Edit it to declare commands, then run [bold cyan]spg install[/].")
     return 0
 
 
@@ -125,11 +150,12 @@ def uninstall(name: str | None, directory: str) -> int:
         config = _resolve_config(Path(directory))
         project_name = config.name
     result = uninstall_project(project_name, registry, bin_dir())
-    click.echo(f"Uninstalled {result.project}.")
+    console.print(f"[bold green]✓[/] Uninstalled [bold cyan]{result.project}[/].")
     if result.removed:
-        click.echo("  removed: " + ", ".join(result.removed))
+        _print_change_line("-", "red", "removed", result.removed)
     if result.skipped:
-        click.echo("  skipped (not spg-managed): " + ", ".join(result.skipped))
+        _print_change_line("!", "yellow", "skipped", result.skipped)
+        console.print("  [dim](skipped entries are not spg-managed)[/]")
     return 0
 
 
@@ -138,25 +164,25 @@ def sync() -> int:
     """Re-read every registered project's spg.toml and refresh ~/bin wrappers."""
     registry = Registry.load(registry_path())
     if not registry.projects:
-        click.echo("No projects registered.")
+        console.print("[dim]No projects registered.[/]")
         return 0
     any_failures = False
     for entry in list(registry):
         config_file = entry.root / PROJECT_CONFIG_FILENAME
         if not config_file.is_file():
-            click.echo(f"warn: {entry.name}: {config_file} is missing; skipping", err=True)
+            err_console.print(f"[yellow]warn:[/] {entry.name}: {config_file} is missing; skipping")
             any_failures = True
             continue
         try:
             config = load_project_config(config_file)
         except ConfigError as exc:
-            click.echo(f"warn: {entry.name}: {exc}", err=True)
+            err_console.print(f"[yellow]warn:[/] {entry.name}: {exc}")
             any_failures = True
             continue
         try:
             result = sync_project(config, registry, bin_dir())
         except InstallError as exc:
-            click.echo(f"warn: {entry.name}: {exc}", err=True)
+            err_console.print(f"[yellow]warn:[/] {entry.name}: {exc}")
             any_failures = True
             continue
         _print_install_result(result, verb="Synced")
@@ -168,12 +194,30 @@ def list_projects() -> int:
     """Show registered projects and their commands."""
     registry = Registry.load(registry_path())
     if not registry.projects:
-        click.echo("No projects registered.")
+        console.print("[dim]No projects registered.[/] Run [bold cyan]spg install[/] in a project.")
         return 0
-    for entry in sorted(registry, key=lambda e: e.name):
-        commands = ", ".join(entry.commands) if entry.commands else "(none)"
-        click.echo(f"{entry.name}  {entry.root}")
-        click.echo(f"  commands: {commands}")
+
+    entries = sorted(registry, key=lambda e: e.name)
+    total_commands = sum(len(e.commands) for e in entries)
+
+    table = Table(box=box.SIMPLE_HEAD, header_style="bold", expand=False, pad_edge=False)
+    table.add_column("Project", style="bold cyan", no_wrap=True)
+    table.add_column("Commands", style="green")
+    table.add_column("Root", style="dim", overflow="fold")
+    for entry in entries:
+        commands = (
+            Text("  ").join(Text(c, style="green") for c in entry.commands)
+            if entry.commands
+            else Text("(none)", style="dim italic")
+        )
+        table.add_row(entry.name, commands, _short_path(entry.root))
+
+    console.print(table)
+    project_word = "project" if len(entries) == 1 else "projects"
+    command_word = "command" if total_commands == 1 else "commands"
+    console.print(
+        f"[dim]{len(entries)} {project_word}, {total_commands} {command_word}.[/]"
+    )
     return 0
 
 
@@ -184,46 +228,71 @@ def help_(name: str) -> int:
     registry = Registry.load(registry_path())
     owner = registry.find_owner_of_command(name)
     if owner is None:
-        click.echo(f"spg: no registered command named {name!r}", err=True)
+        err_console.print(f"[red]spg:[/] no registered command named [bold]{name}[/]")
         return 1
     config_file = owner.root / PROJECT_CONFIG_FILENAME
     if not config_file.is_file():
-        click.echo(f"spg: {owner.name}: {config_file} is missing", err=True)
+        err_console.print(f"[red]spg:[/] {owner.name}: {config_file} is missing")
         return 1
     config = load_project_config(config_file)
     cmd = config.command(name)
     if cmd is None:
-        click.echo(
-            f"spg: registry says {owner.name!r} owns {name!r}, but it's no longer in {config_file}. "
-            f"Run `spg sync`.",
-            err=True,
+        err_console.print(
+            f"[red]spg:[/] registry says [bold]{owner.name}[/] owns [bold]{name}[/], but it's "
+            f"no longer in {config_file}. Run [bold cyan]spg sync[/]."
         )
         return 1
-    click.echo(f"{cmd.name}  ({owner.name})")
+
+    body: list[RenderableType] = []
     if cmd.description:
-        click.echo(f"  {cmd.description}")
+        body.append(Text(cmd.description, style="italic"))
+
     if cmd.args:
-        click.echo("  Arguments:")
-        width = max(len(a.name) for a in cmd.args)
+        args_table = Table(box=None, show_header=False, pad_edge=False, padding=(0, 2, 0, 0))
+        args_table.add_column(style="yellow", no_wrap=True)
+        args_table.add_column(overflow="fold")
         for a in cmd.args:
             extras = []
             if a.values:
                 extras.append("one of: " + ", ".join(a.values))
             elif a.type:
                 extras.append(a.type)
-            desc = a.description or ""
+            desc = Text(a.description or "")
             if extras:
-                hint = " (" + "; ".join(extras) + ")"
-                desc = f"{desc}{hint}" if desc else hint.lstrip(" ")
-            click.echo(f"    {a.name.ljust(width)}  {desc}")
-    if cmd.complete_hook:
-        click.echo(f"  Completion hook: {cmd.complete_hook}")
+                if desc.plain:
+                    desc.append(" ")
+                desc.append("(" + "; ".join(extras) + ")", style="dim")
+            args_table.add_row(a.name, desc)
+        if body:
+            body.append(Text())
+        body.append(Text("Arguments", style="bold"))
+        body.append(args_table)
+
+    detail = Text()
     if cmd.is_shell_function:
-        click.echo(f"  Shell function (sourced at shell start, from {owner.root}):")
+        detail.append("Shell function", style="bold")
+        detail.append(f"  (sourced at shell start, from {_short_path(owner.root)})", style="dim")
         for line in cmd.shell_function.splitlines() or [""]:
-            click.echo(f"    {line}")
+            detail.append("\n  ")
+            detail.append(line, style="green")
     else:
-        click.echo(f"  Runs: {cmd.run}  (from {owner.root})")
+        detail.append("Runs", style="bold")
+        detail.append("  ")
+        detail.append(str(cmd.run), style="green")
+        detail.append(f"  (from {_short_path(owner.root)})", style="dim")
+    if cmd.complete_hook:
+        detail.append("\n")
+        detail.append("Completion hook", style="bold")
+        detail.append("  ")
+        detail.append(cmd.complete_hook, style="green")
+    if body:
+        body.append(Text())
+    body.append(detail)
+
+    title = Text()
+    title.append(cmd.name, style="bold cyan")
+    title.append(f"  ({owner.name})", style="dim")
+    console.print(Panel(Group(*body), title=title, title_align="left", box=box.ROUNDED, padding=(1, 2)))
     return 0
 
 
@@ -235,10 +304,14 @@ def status() -> int:
     registered = {e.name: e for e in registry}
     wrappers = list_managed_wrappers(bd)
 
-    click.echo(f"Registry: {registry_path()}")
-    click.echo(f"Bin dir:  {bd}")
-    click.echo(f"Projects registered: {len(registered)}")
-    click.echo(f"Managed wrappers in ~/bin: {len(wrappers)}")
+    summary = Table(box=None, show_header=False, pad_edge=False, padding=(0, 2, 0, 0))
+    summary.add_column(style="bold", no_wrap=True)
+    summary.add_column(overflow="fold")
+    summary.add_row("Registry", _short_path(registry_path()))
+    summary.add_row("Bin dir", _short_path(bd))
+    summary.add_row("Projects registered", str(len(registered)))
+    summary.add_row("Managed wrappers", str(len(wrappers)))
+    console.print(summary)
 
     by_project: dict[str, list[str]] = {}
     for path, meta in wrappers:
@@ -274,11 +347,19 @@ def status() -> int:
                 problems.append(f"wrapper {cmd!r} not declared in {project!r}'s spg.toml")
 
     if problems:
-        click.echo("\nProblems:")
-        for p in problems:
-            click.echo(f"  - {p}")
+        items = Text()
+        for i, p in enumerate(problems):
+            if i:
+                items.append("\n")
+            items.append("• ", style="red")
+            items.append(p)
+        count = "1 problem" if len(problems) == 1 else f"{len(problems)} problems"
+        console.print()
+        console.print(
+            Panel(items, title=f"[bold red]{count}[/]", title_align="left", box=box.ROUNDED, padding=(1, 2))
+        )
         return 1
-    click.echo("\nAll good.")
+    console.print("\n[bold green]✓[/] All good.")
     return 0
 
 
@@ -287,9 +368,9 @@ def status() -> int:
 def completion(ctx: click.Context) -> int:
     """Print a shell completion script (e.g. `spg completion zsh`)."""
     if ctx.invoked_subcommand is None:
-        click.echo("usage: spg completion <shell>", err=True)
-        click.echo("supported shells: zsh", err=True)
-        click.echo("(example: `source <(spg completion zsh)` in ~/.zshrc)", err=True)
+        err_console.print("usage: [bold cyan]spg completion <shell>[/]")
+        err_console.print("supported shells: [green]zsh[/]")
+        err_console.print("(example: [dim]source <(spg completion zsh)[/] in ~/.zshrc)")
         return 1
     return 0
 
@@ -359,7 +440,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         result = cli.main(args=args, prog_name="spg", standalone_mode=False)
     except (ConfigError, InstallError) as exc:
-        click.echo(f"spg: {exc}", err=True)
+        err_console.print(f"[red]spg:[/] {exc}")
         return 1
     except _click.exceptions.UsageError as exc:
         exc.show()
@@ -394,14 +475,25 @@ def _resolve_config(start: Path) -> ProjectConfig:
     return load_project_config_from_dir(start.parent)
 
 
+def _print_change_line(symbol: str, style: str, label: str, names: list[str]) -> None:
+    line = Text()
+    line.append("  ")
+    line.append(f"{symbol} ", style=style)
+    line.append(f"{label} ".ljust(12), style="bold")
+    line.append(", ".join(names), style=style)
+    console.print(line)
+
+
 def _print_install_result(result: InstallResult, verb: str = "Installed") -> None:
-    click.echo(f"{verb} {result.project}.")
+    console.print(f"[bold green]✓[/] {verb} [bold cyan]{result.project}[/].")
     if result.written:
-        click.echo("  added:     " + ", ".join(result.written))
+        _print_change_line("+", "green", "added", result.written)
     if result.refreshed:
-        click.echo("  refreshed: " + ", ".join(result.refreshed))
+        _print_change_line("~", "yellow", "refreshed", result.refreshed)
     if result.removed:
-        click.echo("  removed:   " + ", ".join(result.removed))
+        _print_change_line("-", "red", "removed", result.removed)
+    if not (result.written or result.refreshed or result.removed):
+        console.print("  [dim]no changes.[/]")
 
 
 if __name__ == "__main__":

@@ -51,10 +51,26 @@ def test_install_list_uninstall_flow(isolated_env, make_project, capsys: pytest.
     out = capsys.readouterr().out
     assert "demo" in out
     assert "hello" in out
+    # rich summary footer reflects the project/command counts
+    assert "1 project" in out
 
     rc = cli.main(["uninstall", "-C", str(project)])
     assert rc == 0
     assert not (isolated_env["bin_dir"] / "hello").exists()
+
+
+def test_list_empty(isolated_env, capsys: pytest.CaptureFixture[str]) -> None:
+    rc = cli.main(["list"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "No projects registered" in out
+
+
+def test_short_path_collapses_home(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(cli.Path, "home", classmethod(lambda cls: tmp_path))
+    assert cli._short_path(tmp_path) == "~"
+    assert cli._short_path(tmp_path / "bin") == "~/bin"
+    assert cli._short_path("/elsewhere/bin") == "/elsewhere/bin"
 
 
 def test_help_for_registered_command(isolated_env, make_project, capsys: pytest.CaptureFixture[str]) -> None:
