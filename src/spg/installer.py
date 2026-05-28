@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import stat
 import tempfile
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -208,13 +209,13 @@ def _check_conflicts(
                 f"({wrapper_path}). Rename it in spg.toml or uninstall the other project."
             )
     if errors:
-        raise InstallError("\n  - ".join(["install would fail:"] + errors))
+        raise InstallError("\n  - ".join(["install would fail:", *errors]))
 
 
 def _write_wrapper(path: Path, *, project: str, command: Command, root: Path) -> None:
     """Atomically (re)create `path` as a regular executable wrapper.
 
-    Uses tempfile + os.replace so we never open the existing dirent for writing;
+    Uses tempfile + atomic replace so we never open the existing dirent for writing;
     if `path` was a symlink, rename(2) replaces the dirent rather than following it.
     """
     content = _render_wrapper(project=project, command=command, root=root)
@@ -224,13 +225,11 @@ def _write_wrapper(path: Path, *, project: str, command: Command, root: Path) ->
     try:
         with os.fdopen(fd, "w") as f:
             f.write(content)
-        os.chmod(tmp_path, 0o755)
-        os.replace(tmp_path, path)
+        tmp_path.chmod(0o755)
+        tmp_path.replace(path)
     except Exception:
-        try:
+        with suppress(FileNotFoundError):
             tmp_path.unlink()
-        except FileNotFoundError:
-            pass
         raise
 
 
@@ -276,7 +275,7 @@ def _read_wrapper_meta(path: Path) -> WrapperMeta | None:
                 stripped = line.strip()
                 if not stripped.startswith(WRAPPER_MARKER):
                     continue
-                payload = stripped[len(WRAPPER_MARKER):].strip()
+                payload = stripped[len(WRAPPER_MARKER) :].strip()
                 if ":" not in payload:
                     return None
                 project, command = payload.split(":", 1)

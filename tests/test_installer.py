@@ -18,7 +18,9 @@ from spg.installer import (
 from spg.registry import Registry
 
 
-def test_install_writes_executable_wrappers(make_project, bin_dir: Path, registry_file: Path) -> None:
+def test_install_writes_executable_wrappers(
+    make_project, bin_dir: Path, registry_file: Path
+) -> None:
     project = make_project("demo")
     config = load_project_config_from_dir(project)
     registry = Registry.load(registry_file)
@@ -47,7 +49,9 @@ def test_install_idempotent_refresh(make_project, bin_dir: Path, registry_file: 
     assert result.refreshed == ["hello"]
 
 
-def test_install_removes_orphaned_commands(make_project, bin_dir: Path, registry_file: Path) -> None:
+def test_install_removes_orphaned_commands(
+    make_project, bin_dir: Path, registry_file: Path
+) -> None:
     body_two = dedent("""\
         [commands.alpha]
         run = "./scripts/hello.sh"
@@ -66,9 +70,7 @@ def test_install_removes_orphaned_commands(make_project, bin_dir: Path, registry
         [commands.alpha]
         run = "./scripts/hello.sh"
     """)
-    (project / "spg.toml").write_text(
-        f'[project]\nname = "demo"\n\n' + body_one
-    )
+    (project / "spg.toml").write_text('[project]\nname = "demo"\n\n' + body_one)
     config = load_project_config_from_dir(project)
     result = install_project(config, registry, bin_dir)
     assert "beta" in result.removed
@@ -76,7 +78,9 @@ def test_install_removes_orphaned_commands(make_project, bin_dir: Path, registry
     assert (bin_dir / "alpha").exists()
 
 
-def test_install_conflict_with_unmanaged_file(make_project, bin_dir: Path, registry_file: Path) -> None:
+def test_install_conflict_with_unmanaged_file(
+    make_project, bin_dir: Path, registry_file: Path
+) -> None:
     project = make_project("demo")
     (bin_dir / "hello").write_text("#!/bin/sh\n# not ours\n")
     config = load_project_config_from_dir(project)
@@ -89,7 +93,9 @@ def test_install_conflict_with_unmanaged_file(make_project, bin_dir: Path, regis
     assert "# spg-managed: demo:hello" in (bin_dir / "hello").read_text()
 
 
-def test_install_conflict_with_other_project(make_project, bin_dir: Path, registry_file: Path) -> None:
+def test_install_conflict_with_other_project(
+    make_project, bin_dir: Path, registry_file: Path
+) -> None:
     project_a = make_project("alpha")
     project_b = make_project("bravo")
     registry = Registry.load(registry_file)
@@ -100,7 +106,9 @@ def test_install_conflict_with_other_project(make_project, bin_dir: Path, regist
         install_project(config_b, registry, bin_dir)
 
 
-def test_uninstall_removes_only_owned_wrappers(make_project, bin_dir: Path, registry_file: Path) -> None:
+def test_uninstall_removes_only_owned_wrappers(
+    make_project, bin_dir: Path, registry_file: Path
+) -> None:
     project = make_project("demo")
     config = load_project_config_from_dir(project)
     registry = Registry.load(registry_file)
@@ -113,7 +121,9 @@ def test_uninstall_removes_only_owned_wrappers(make_project, bin_dir: Path, regi
     assert "demo" not in Registry.load(registry_file).projects
 
 
-def test_uninstall_skips_non_managed_wrappers(make_project, bin_dir: Path, registry_file: Path) -> None:
+def test_uninstall_skips_non_managed_wrappers(
+    make_project, bin_dir: Path, registry_file: Path
+) -> None:
     project = make_project("demo")
     config = load_project_config_from_dir(project)
     registry = Registry.load(registry_file)
@@ -153,13 +163,15 @@ def test_wrapper_executes_with_args(make_project, bin_dir: Path, registry_file: 
 def test_wrapper_runs_multiword_command(tmp_path: Path, bin_dir: Path, registry_file: Path) -> None:
     project = tmp_path / "multi"
     project.mkdir()
-    (project / "spg.toml").write_text(dedent("""\
+    (project / "spg.toml").write_text(
+        dedent("""\
         [project]
         name = "multi"
 
         [commands.q]
         run = "/usr/bin/env echo prefix"
-    """))
+    """)
+    )
     config = load_project_config_from_dir(project)
     install_project(config, Registry.load(registry_file), bin_dir)
     result = subprocess.run(
@@ -209,9 +221,7 @@ def test_install_refuses_same_name_from_different_root(
     make_project, tmp_path: Path, bin_dir: Path, registry_file: Path
 ) -> None:
     proj_a = make_project("dupe")
-    install_project(
-        load_project_config_from_dir(proj_a), Registry.load(registry_file), bin_dir
-    )
+    install_project(load_project_config_from_dir(proj_a), Registry.load(registry_file), bin_dir)
 
     proj_b = tmp_path / "elsewhere"
     proj_b.mkdir()
@@ -314,14 +324,16 @@ def test_install_shell_function_skips_wrapper_but_registers(
 ) -> None:
     project = tmp_path / "fn"
     project.mkdir()
-    (project / "spg.toml").write_text(dedent("""\
+    (project / "spg.toml").write_text(
+        dedent("""\
         [project]
         name = "fn"
 
         [commands.gocd]
         description = "cd somewhere"
         shell_function = 'cd "$(echo "$@")"'
-    """))
+    """)
+    )
     config = load_project_config_from_dir(project)
     registry = Registry.load(registry_file)
     result = install_project(config, registry, bin_dir)
@@ -343,7 +355,8 @@ def test_install_mixed_run_and_shell_function(
     scripts.mkdir()
     (scripts / "hi.sh").write_text("#!/bin/sh\necho hi\n")
     (scripts / "hi.sh").chmod(0o755)
-    (project / "spg.toml").write_text(dedent("""\
+    (project / "spg.toml").write_text(
+        dedent("""\
         [project]
         name = "mixed"
 
@@ -352,7 +365,8 @@ def test_install_mixed_run_and_shell_function(
 
         [commands.gocd]
         shell_function = 'cd .'
-    """))
+    """)
+    )
     config = load_project_config_from_dir(project)
     result = install_project(config, Registry.load(registry_file), bin_dir)
     assert result.written == ["hi"]
@@ -371,25 +385,27 @@ def test_install_switch_run_to_shell_function_removes_wrapper(
     (scripts / "hi.sh").write_text("#!/bin/sh\necho hi\n")
     (scripts / "hi.sh").chmod(0o755)
     spg_toml = project / "spg.toml"
-    spg_toml.write_text(dedent("""\
+    spg_toml.write_text(
+        dedent("""\
         [project]
         name = "switch"
 
         [commands.foo]
         run = "./scripts/hi.sh"
-    """))
-    install_project(
-        load_project_config_from_dir(project), Registry.load(registry_file), bin_dir
+    """)
     )
+    install_project(load_project_config_from_dir(project), Registry.load(registry_file), bin_dir)
     assert (bin_dir / "foo").exists()
 
-    spg_toml.write_text(dedent("""\
+    spg_toml.write_text(
+        dedent("""\
         [project]
         name = "switch"
 
         [commands.foo]
         shell_function = 'cd .'
-    """))
+    """)
+    )
     result = install_project(
         load_project_config_from_dir(project), Registry.load(registry_file), bin_dir
     )
@@ -402,26 +418,28 @@ def test_install_shell_function_collides_across_projects(
 ) -> None:
     project_a = tmp_path / "a"
     project_a.mkdir()
-    (project_a / "spg.toml").write_text(dedent("""\
+    (project_a / "spg.toml").write_text(
+        dedent("""\
         [project]
         name = "a"
 
         [commands.shared]
         shell_function = 'cd .'
-    """))
-    install_project(
-        load_project_config_from_dir(project_a), Registry.load(registry_file), bin_dir
+    """)
     )
+    install_project(load_project_config_from_dir(project_a), Registry.load(registry_file), bin_dir)
 
     project_b = tmp_path / "b"
     project_b.mkdir()
-    (project_b / "spg.toml").write_text(dedent("""\
+    (project_b / "spg.toml").write_text(
+        dedent("""\
         [project]
         name = "b"
 
         [commands.shared]
         shell_function = 'cd /tmp'
-    """))
+    """)
+    )
     with pytest.raises(InstallError, match="already registered to project 'a'"):
         install_project(
             load_project_config_from_dir(project_b), Registry.load(registry_file), bin_dir
@@ -433,13 +451,15 @@ def test_uninstall_shell_function_command_silently(
 ) -> None:
     project = tmp_path / "fn"
     project.mkdir()
-    (project / "spg.toml").write_text(dedent("""\
+    (project / "spg.toml").write_text(
+        dedent("""\
         [project]
         name = "fn"
 
         [commands.gocd]
         shell_function = 'cd .'
-    """))
+    """)
+    )
     config = load_project_config_from_dir(project)
     install_project(config, Registry.load(registry_file), bin_dir)
     result = uninstall_project("fn", Registry.load(registry_file), bin_dir)
@@ -454,15 +474,17 @@ def test_wrapper_quotes_root_with_space(tmp_path: Path, bin_dir: Path, registry_
     scripts = project / "scripts"
     scripts.mkdir()
     hello = scripts / "hello.sh"
-    hello.write_text("#!/bin/sh\necho yes \"$@\"\n")
+    hello.write_text('#!/bin/sh\necho yes "$@"\n')
     hello.chmod(0o755)
-    (project / "spg.toml").write_text(dedent("""\
+    (project / "spg.toml").write_text(
+        dedent("""\
         [project]
         name = "spaced"
 
         [commands.s]
         run = "./scripts/hello.sh"
-    """))
+    """)
+    )
     config = load_project_config_from_dir(project)
     install_project(config, Registry.load(registry_file), bin_dir)
     result = subprocess.run(

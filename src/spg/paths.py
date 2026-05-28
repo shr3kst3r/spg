@@ -7,7 +7,7 @@ PROJECT_CONFIG_FILENAME = "spg.toml"
 
 
 def home() -> Path:
-    return Path(os.path.expanduser("~"))
+    return Path("~").expanduser()
 
 
 def bin_dir() -> Path:

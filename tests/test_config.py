@@ -14,10 +14,13 @@ def write(tmp_path: Path, body: str) -> Path:
 
 
 def test_loads_minimal_config(tmp_path: Path) -> None:
-    write(tmp_path, dedent("""\
+    write(
+        tmp_path,
+        dedent("""\
         [project]
         name = "demo"
-    """))
+    """),
+    )
     config = load_project_config_from_dir(tmp_path)
     assert config.name == "demo"
     assert config.commands == ()
@@ -25,7 +28,9 @@ def test_loads_minimal_config(tmp_path: Path) -> None:
 
 
 def test_loads_command_with_args(tmp_path: Path) -> None:
-    write(tmp_path, dedent("""\
+    write(
+        tmp_path,
+        dedent("""\
         [project]
         name = "demo"
 
@@ -36,7 +41,8 @@ def test_loads_command_with_args(tmp_path: Path) -> None:
             { name = "who", description = "name" },
             { name = "--loud" },
         ]
-    """))
+    """),
+    )
     config = load_project_config_from_dir(tmp_path)
     assert len(config.commands) == 1
     cmd = config.commands[0]
@@ -55,29 +61,35 @@ def test_missing_project_section(tmp_path: Path) -> None:
 
 
 def test_missing_project_name(tmp_path: Path) -> None:
-    write(tmp_path, dedent("""\
+    write(
+        tmp_path,
+        dedent("""\
         [project]
-    """))
-    with pytest.raises(ConfigError, match="project].name"):
+    """),
+    )
+    with pytest.raises(ConfigError, match=r"project\]\.name"):
         load_project_config_from_dir(tmp_path)
 
 
 def test_command_missing_run(tmp_path: Path) -> None:
-    write(tmp_path, dedent("""\
+    write(
+        tmp_path,
+        dedent("""\
         [project]
         name = "demo"
 
         [commands.bad]
         description = "no run"
-    """))
-    with pytest.raises(
-        ConfigError, match=r"commands\.bad\] must set 'run' or 'shell_function'"
-    ):
+    """),
+    )
+    with pytest.raises(ConfigError, match=r"commands\.bad\] must set 'run' or 'shell_function'"):
         load_project_config_from_dir(tmp_path)
 
 
 def test_loads_shell_function_command(tmp_path: Path) -> None:
-    write(tmp_path, dedent("""\
+    write(
+        tmp_path,
+        dedent("""\
         [project]
         name = "demo"
 
@@ -88,7 +100,8 @@ def test_loads_shell_function_command(tmp_path: Path) -> None:
         args = [
             { name = "target" },
         ]
-    """))
+    """),
+    )
     config = load_project_config_from_dir(tmp_path)
     cmd = config.commands[0]
     assert cmd.name == "gocd"
@@ -100,65 +113,78 @@ def test_loads_shell_function_command(tmp_path: Path) -> None:
 
 
 def test_command_run_and_shell_function_mutually_exclusive(tmp_path: Path) -> None:
-    write(tmp_path, dedent("""\
+    write(
+        tmp_path,
+        dedent("""\
         [project]
         name = "demo"
 
         [commands.bad]
         run = "./x"
         shell_function = "cd ."
-    """))
+    """),
+    )
     with pytest.raises(ConfigError, match="cannot set both 'run' and 'shell_function'"):
         load_project_config_from_dir(tmp_path)
 
 
 def test_command_run_must_be_string(tmp_path: Path) -> None:
-    write(tmp_path, dedent("""\
+    write(
+        tmp_path,
+        dedent("""\
         [project]
         name = "demo"
 
         [commands.bad]
         run = 123
-    """))
+    """),
+    )
     with pytest.raises(ConfigError, match=r"commands\.bad\]\.run must be a string"):
         load_project_config_from_dir(tmp_path)
 
 
 def test_shell_function_must_be_string(tmp_path: Path) -> None:
-    write(tmp_path, dedent("""\
+    write(
+        tmp_path,
+        dedent("""\
         [project]
         name = "demo"
 
         [commands.bad]
         shell_function = 42
-    """))
-    with pytest.raises(
-        ConfigError, match=r"commands\.bad\]\.shell_function must be a string"
-    ):
+    """),
+    )
+    with pytest.raises(ConfigError, match=r"commands\.bad\]\.shell_function must be a string"):
         load_project_config_from_dir(tmp_path)
 
 
 def test_invalid_command_name(tmp_path: Path) -> None:
-    write(tmp_path, dedent("""\
+    write(
+        tmp_path,
+        dedent("""\
         [project]
         name = "demo"
 
         [commands."bad name"]
         run = "./x"
-    """))
+    """),
+    )
     with pytest.raises(ConfigError, match="invalid command name"):
         load_project_config_from_dir(tmp_path)
 
 
 def test_arg_must_be_table(tmp_path: Path) -> None:
-    write(tmp_path, dedent("""\
+    write(
+        tmp_path,
+        dedent("""\
         [project]
         name = "demo"
 
         [commands.foo]
         run = "./x"
         args = ["bare"]
-    """))
+    """),
+    )
     with pytest.raises(ConfigError, match=r"args\[0\]"):
         load_project_config_from_dir(tmp_path)
 
@@ -169,7 +195,9 @@ def test_missing_file_errors(tmp_path: Path) -> None:
 
 
 def test_loads_completion_fields(tmp_path: Path) -> None:
-    write(tmp_path, dedent("""\
+    write(
+        tmp_path,
+        dedent("""\
         [project]
         name = "demo"
 
@@ -182,7 +210,8 @@ def test_loads_completion_fields(tmp_path: Path) -> None:
             { name = "--dry-run" },
         ]
         complete_hook = "./scripts/x __complete"
-    """))
+    """),
+    )
     config = load_project_config_from_dir(tmp_path)
     cmd = config.commands[0]
     target, cfg, region, dry = cmd.args
@@ -197,21 +226,24 @@ def test_loads_completion_fields(tmp_path: Path) -> None:
 
 
 def test_arg_type_must_be_known(tmp_path: Path) -> None:
-    write(tmp_path, dedent("""\
+    write(
+        tmp_path,
+        dedent("""\
         [project]
         name = "demo"
 
         [commands.x]
         run = "./x"
         args = [{ name = "y", type = "bogus" }]
-    """))
+    """),
+    )
     with pytest.raises(ConfigError, match=r"args\[0\].type"):
         load_project_config_from_dir(tmp_path)
 
 
 @pytest.mark.parametrize(
     "bad_name",
-    ['foo:bar', 'has space', '-leading-dash', '1leading-digit', 'has\nnewline'],
+    ["foo:bar", "has space", "-leading-dash", "1leading-digit", "has\nnewline"],
 )
 def test_project_name_rejects_unsafe_characters(tmp_path: Path, bad_name: str) -> None:
     raw = bad_name.encode("unicode_escape").decode("ascii")
@@ -238,13 +270,16 @@ def test_project_name_allows_safe_characters(tmp_path: Path) -> None:
 
 
 def test_arg_cannot_set_both_type_and_values(tmp_path: Path) -> None:
-    write(tmp_path, dedent("""\
+    write(
+        tmp_path,
+        dedent("""\
         [project]
         name = "demo"
 
         [commands.x]
         run = "./x"
         args = [{ name = "y", type = "files", values = ["a"] }]
-    """))
+    """),
+    )
     with pytest.raises(ConfigError, match="cannot set both"):
         load_project_config_from_dir(tmp_path)

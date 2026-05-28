@@ -40,7 +40,7 @@ def make_project(tmp_path: Path):
         scripts = project_dir / "scripts"
         scripts.mkdir(exist_ok=True)
         hello = scripts / "hello.sh"
-        hello.write_text("#!/bin/sh\necho hello \"$@\"\n")
+        hello.write_text('#!/bin/sh\necho hello "$@"\n')
         hello.chmod(0o755)
         return project_dir
 

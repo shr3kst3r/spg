@@ -46,9 +46,7 @@ def test_candidates_for_spg_help_lists_managed_commands(
 ) -> None:
     project = make_project("demo")
     cli.main(["install", "-C", str(project)])
-    cands = candidates_for_spg(
-        ["spg", "help", ""], current=3, registry=_registered(isolated_env)
-    )
+    cands = candidates_for_spg(["spg", "help", ""], current=3, registry=_registered(isolated_env))
     assert "hello" in cands
 
 
@@ -105,29 +103,21 @@ def test_candidates_for_command_positional_values(
     assert any(c.startswith("prod") for c in cands)
 
     # Second positional → files sentinel
-    cands = candidates_for_command(
-        "deploy", ["deploy", "staging", ""], current=3, registry=reg
-    )
+    cands = candidates_for_command("deploy", ["deploy", "staging", ""], current=3, registry=reg)
     assert cands == [SENTINEL_FILES]
 
     # `--region <TAB>` → values
-    cands = candidates_for_command(
-        "deploy", ["deploy", "--region", ""], current=3, registry=reg
-    )
+    cands = candidates_for_command("deploy", ["deploy", "--region", ""], current=3, registry=reg)
     assert any(c.startswith("us-east-1") for c in cands)
 
     # Current word starts with `-` → flag names
-    cands = candidates_for_command(
-        "deploy", ["deploy", "-"], current=2, registry=reg
-    )
+    cands = candidates_for_command("deploy", ["deploy", "-"], current=2, registry=reg)
     names = [c.split(":", 1)[0] for c in cands]
     assert "--region" in names
     assert "--dry-run" in names
 
     # Boolean flag does not steal the next positional slot
-    cands = candidates_for_command(
-        "deploy", ["deploy", "--dry-run", ""], current=3, registry=reg
-    )
+    cands = candidates_for_command("deploy", ["deploy", "--dry-run", ""], current=3, registry=reg)
     assert any(c.startswith("staging") for c in cands)
 
 
@@ -169,11 +159,7 @@ def test_candidates_for_command_hook_supplies_dash_prefix(
     project.mkdir()
     hook = project / "scripts" / "hook.sh"
     hook.parent.mkdir()
-    hook.write_text(
-        "#!/bin/sh\n"
-        "echo --alpha:dynamic alpha flag\n"
-        "echo --beta:dynamic beta flag\n"
-    )
+    hook.write_text("#!/bin/sh\necho --alpha:dynamic alpha flag\necho --beta:dynamic beta flag\n")
     hook.chmod(0o755)
     (project / "spg.toml").write_text(
         dedent(
@@ -194,9 +180,7 @@ def test_candidates_for_command_hook_supplies_dash_prefix(
     assert "--beta:dynamic beta flag" in cands
 
 
-def test_candidates_for_command_spg_delegates(
-    isolated_env: dict[str, Path], make_project
-) -> None:
+def test_candidates_for_command_spg_delegates(isolated_env: dict[str, Path], make_project) -> None:
     project = make_project("demo")
     cli.main(["install", "-C", str(project)])
     reg = _registered(isolated_env)
@@ -212,14 +196,11 @@ def test_list_managed_commands_orders_and_dedupes(
     p1 = tmp_path / "p1"
     p1.mkdir()
     (p1 / "spg.toml").write_text(
-        '[project]\nname = "p1"\n[commands.zeta]\nrun = "./x"\n'
-        '[commands.alpha]\nrun = "./x"\n'
+        '[project]\nname = "p1"\n[commands.zeta]\nrun = "./x"\n[commands.alpha]\nrun = "./x"\n'
     )
     p2 = tmp_path / "p2"
     p2.mkdir()
-    (p2 / "spg.toml").write_text(
-        '[project]\nname = "p2"\n[commands.mid]\nrun = "./x"\n'
-    )
+    (p2 / "spg.toml").write_text('[project]\nname = "p2"\n[commands.mid]\nrun = "./x"\n')
     cli.main(["install", "-C", str(p1), "--force"])
     cli.main(["install", "-C", str(p2), "--force"])
     reg = _registered(isolated_env)
@@ -271,7 +252,7 @@ def test_render_shell_function_defs(isolated_env: dict[str, Path], tmp_path: Pat
     defs = render_shell_function_defs(reg)
     assert 'gocd() {\ncd "$(./scripts/resolve.sh "$@")"\n}' in defs
     assert "multi() {" in defs
-    assert "cd \"$target\"" in defs
+    assert 'cd "$target"' in defs
     # `plain` is a wrapper command, no function emitted for it.
     assert "plain() {" not in defs
 
@@ -368,5 +349,3 @@ def test_completion_no_shell_argument_errors(
     assert rc == 1
     err = capsys.readouterr().err
     assert "supported shells" in err
-
-

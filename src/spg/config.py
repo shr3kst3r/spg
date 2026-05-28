@@ -74,7 +74,9 @@ def load_project_config(config_path: Path) -> ProjectConfig:
         raise ConfigError(f"{config_path}: missing [project] section")
     name = project_section.get("name")
     if not isinstance(name, str) or not name.strip():
-        raise ConfigError(f"{config_path}: [project].name is required and must be a non-empty string")
+        raise ConfigError(
+            f"{config_path}: [project].name is required and must be a non-empty string"
+        )
     name = name.strip()
     if not _PROJECT_NAME_RE.match(name):
         raise ConfigError(
@@ -112,9 +114,7 @@ def _parse_command(config_path: Path, cmd_name: str, body: Any) -> Command:
 
     shell_function = body.get("shell_function", "")
     if not isinstance(shell_function, str):
-        raise ConfigError(
-            f"{config_path}: [commands.{cmd_name}].shell_function must be a string"
-        )
+        raise ConfigError(f"{config_path}: [commands.{cmd_name}].shell_function must be a string")
 
     has_run = bool(run.strip())
     has_fn = bool(shell_function.strip())
@@ -139,7 +139,8 @@ def _parse_command(config_path: Path, cmd_name: str, body: Any) -> Command:
     for i, raw_arg in enumerate(args_raw):
         if not isinstance(raw_arg, dict):
             raise ConfigError(
-                f"{config_path}: [commands.{cmd_name}].args[{i}] must be a table with 'name' and optional 'description'"
+                f"{config_path}: [commands.{cmd_name}].args[{i}] must be a table "
+                "with 'name' and optional 'description'"
             )
         arg_dict = cast(dict[str, Any], raw_arg)
         arg_name = arg_dict.get("name")
@@ -147,22 +148,30 @@ def _parse_command(config_path: Path, cmd_name: str, body: Any) -> Command:
             raise ConfigError(f"{config_path}: [commands.{cmd_name}].args[{i}].name is required")
         arg_desc = arg_dict.get("description", "")
         if not isinstance(arg_desc, str):
-            raise ConfigError(f"{config_path}: [commands.{cmd_name}].args[{i}].description must be a string")
+            raise ConfigError(
+                f"{config_path}: [commands.{cmd_name}].args[{i}].description must be a string"
+            )
         arg_type = arg_dict.get("type", "")
         if not isinstance(arg_type, str):
-            raise ConfigError(f"{config_path}: [commands.{cmd_name}].args[{i}].type must be a string")
+            raise ConfigError(
+                f"{config_path}: [commands.{cmd_name}].args[{i}].type must be a string"
+            )
         if arg_type and arg_type not in _ARG_TYPES:
             raise ConfigError(
-                f"{config_path}: [commands.{cmd_name}].args[{i}].type must be one of {_ARG_TYPES} (got {arg_type!r})"
+                f"{config_path}: [commands.{cmd_name}].args[{i}].type must be one of "
+                f"{_ARG_TYPES} (got {arg_type!r})"
             )
         arg_values_raw = arg_dict.get("values", [])
-        if not isinstance(arg_values_raw, list) or not all(isinstance(v, str) for v in arg_values_raw):
+        if not isinstance(arg_values_raw, list) or not all(
+            isinstance(v, str) for v in arg_values_raw
+        ):
             raise ConfigError(
                 f"{config_path}: [commands.{cmd_name}].args[{i}].values must be a list of strings"
             )
         if arg_type and arg_values_raw:
             raise ConfigError(
-                f"{config_path}: [commands.{cmd_name}].args[{i}] cannot set both 'type' and 'values'"
+                f"{config_path}: [commands.{cmd_name}].args[{i}] cannot set both "
+                "'type' and 'values'"
             )
         args.append(
             CommandArg(

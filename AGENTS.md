@@ -26,13 +26,18 @@ It self-hosts: the project's own commands are declared in [`spg.toml`](spg.toml)
 Always run via `uv` so the right environment is used:
 
 ```sh
-uv run pytest        # full test suite (tests/)
-uv run ty check      # type-check src/ (config in pyproject.toml [tool.ty])
-uv run spg --help    # exercise the CLI from source
+uv run pytest          # full test suite (tests/)
+uv run ty check        # type-check src/ (config in pyproject.toml [tool.ty])
+uv run ruff check .    # lint (config in pyproject.toml [tool.ruff])
+uv run ruff format .   # format
+uv run spg --help      # exercise the CLI from source
 ```
 
-There is no separate build/lint step; `pytest` and `ty check` are the gates.
-Both should pass before you consider a change done.
+`pytest`, `ty check`, and `ruff` (lint + format) are the gates; all must pass
+before you consider a change done. The same checks run in
+[`.pre-commit-config.yaml`](.pre-commit-config.yaml) — install the hooks once
+with `uv run --with pre-commit pre-commit install`, or run them across the tree
+with `uv run --with pre-commit pre-commit run --all-files`.
 
 ## Architecture map
 

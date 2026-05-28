@@ -19,7 +19,9 @@ def isolated_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict[str, P
     return {"bin_dir": bd, "registry": registry}
 
 
-def test_init_creates_starter_config(isolated_env, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_init_creates_starter_config(
+    isolated_env, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     target = tmp_path / "newproj"
     target.mkdir()
     rc = cli.main(["init", "-C", str(target), "--name", "newproj"])
@@ -32,15 +34,19 @@ def test_init_creates_starter_config(isolated_env, tmp_path: Path, capsys: pytes
     assert "Wrote" in out
 
 
-def test_init_refuses_overwrite(isolated_env, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_init_refuses_overwrite(
+    isolated_env, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     target = tmp_path / "newproj"
     target.mkdir()
-    (target / "spg.toml").write_text("[project]\nname = \"x\"\n")
+    (target / "spg.toml").write_text('[project]\nname = "x"\n')
     rc = cli.main(["init", "-C", str(target)])
     assert rc == 1
 
 
-def test_install_list_uninstall_flow(isolated_env, make_project, capsys: pytest.CaptureFixture[str]) -> None:
+def test_install_list_uninstall_flow(
+    isolated_env, make_project, capsys: pytest.CaptureFixture[str]
+) -> None:
     project = make_project("demo")
     rc = cli.main(["install", "-C", str(project)])
     assert rc == 0
@@ -73,7 +79,9 @@ def test_short_path_collapses_home(monkeypatch: pytest.MonkeyPatch, tmp_path: Pa
     assert cli._short_path("/elsewhere/bin") == "/elsewhere/bin"
 
 
-def test_help_for_registered_command(isolated_env, make_project, capsys: pytest.CaptureFixture[str]) -> None:
+def test_help_for_registered_command(
+    isolated_env, make_project, capsys: pytest.CaptureFixture[str]
+) -> None:
     project = make_project("demo")
     cli.main(["install", "-C", str(project)])
     capsys.readouterr()  # drain
@@ -104,7 +112,9 @@ def test_status_clean(isolated_env, make_project, capsys: pytest.CaptureFixture[
     assert "All good" in out
 
 
-def test_status_flags_orphan(isolated_env, make_project, capsys: pytest.CaptureFixture[str]) -> None:
+def test_status_flags_orphan(
+    isolated_env, make_project, capsys: pytest.CaptureFixture[str]
+) -> None:
     project = make_project("demo")
     cli.main(["install", "-C", str(project)])
     capsys.readouterr()
@@ -120,7 +130,9 @@ def test_status_flags_orphan(isolated_env, make_project, capsys: pytest.CaptureF
     assert "orphan wrappers" in out
 
 
-def test_sync_warns_when_config_missing(isolated_env, make_project, capsys: pytest.CaptureFixture[str]) -> None:
+def test_sync_warns_when_config_missing(
+    isolated_env, make_project, capsys: pytest.CaptureFixture[str]
+) -> None:
     project = make_project("demo")
     cli.main(["install", "-C", str(project)])
     capsys.readouterr()

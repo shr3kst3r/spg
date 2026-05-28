@@ -1,7 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Sequence
 
 import click as _click
 import rich_click as click
@@ -93,7 +93,7 @@ def _short_path(path: Path | str) -> str:
     if text == home:
         return "~"
     if text.startswith(home + "/"):
-        return "~" + text[len(home):]
+        return "~" + text[len(home) :]
     return text
 
 
@@ -108,7 +108,12 @@ def cli(ctx: click.Context) -> None:
 
 
 @cli.command()
-@click.option("--name", "name_", default=None, help="Project name to seed in the new config (defaults to directory name).")
+@click.option(
+    "--name",
+    "name_",
+    default=None,
+    help="Project name to seed in the new config (defaults to directory name).",
+)
 @click.option("-C", "--dir", "directory", default=".", show_default=True, help="Project directory.")
 def init(name_: str | None, directory: str) -> int:
     """Create a starter spg.toml in the current directory."""
@@ -129,7 +134,9 @@ def init(name_: str | None, directory: str) -> int:
 
 @cli.command()
 @click.option("-C", "--dir", "directory", default=".", show_default=True, help="Project directory.")
-@click.option("--force", is_flag=True, help="Overwrite non-spg-managed files in ~/bin with matching names.")
+@click.option(
+    "--force", is_flag=True, help="Overwrite non-spg-managed files in ~/bin with matching names."
+)
 def install(directory: str, force: bool) -> int:
     """Register the current project and write wrappers to ~/bin."""
     config = _resolve_config(Path(directory))
@@ -141,7 +148,14 @@ def install(directory: str, force: bool) -> int:
 
 @cli.command()
 @click.argument("name", required=False)
-@click.option("-C", "--dir", "directory", default=".", show_default=True, help="Project directory (used when no name is given).")
+@click.option(
+    "-C",
+    "--dir",
+    "directory",
+    default=".",
+    show_default=True,
+    help="Project directory (used when no name is given).",
+)
 def uninstall(name: str | None, directory: str) -> int:
     """Remove wrappers and registry entry for a project."""
     registry = Registry.load(registry_path())
@@ -215,9 +229,7 @@ def list_projects() -> int:
     console.print(table)
     project_word = "project" if len(entries) == 1 else "projects"
     command_word = "command" if total_commands == 1 else "commands"
-    console.print(
-        f"[dim]{len(entries)} {project_word}, {total_commands} {command_word}.[/]"
-    )
+    console.print(f"[dim]{len(entries)} {project_word}, {total_commands} {command_word}.[/]")
     return 0
 
 
@@ -292,7 +304,9 @@ def help_(name: str) -> int:
     title = Text()
     title.append(cmd.name, style="bold cyan")
     title.append(f"  ({owner.name})", style="dim")
-    console.print(Panel(Group(*body), title=title, title_align="left", box=box.ROUNDED, padding=(1, 2)))
+    console.print(
+        Panel(Group(*body), title=title, title_align="left", box=box.ROUNDED, padding=(1, 2))
+    )
     return 0
 
 
@@ -339,7 +353,9 @@ def status() -> int:
 
     for project, found in by_project.items():
         if project not in registered:
-            problems.append(f"orphan wrappers from unregistered project {project!r}: {', '.join(found)}")
+            problems.append(
+                f"orphan wrappers from unregistered project {project!r}: {', '.join(found)}"
+            )
             continue
         expected = set(registered[project].commands)
         for cmd in found:
@@ -356,7 +372,13 @@ def status() -> int:
         count = "1 problem" if len(problems) == 1 else f"{len(problems)} problems"
         console.print()
         console.print(
-            Panel(items, title=f"[bold red]{count}[/]", title_align="left", box=box.ROUNDED, padding=(1, 2))
+            Panel(
+                items,
+                title=f"[bold red]{count}[/]",
+                title_align="left",
+                box=box.ROUNDED,
+                padding=(1, 2),
+            )
         )
         return 1
     console.print("\n[bold green]✓[/] All good.")

@@ -4,11 +4,12 @@ import fcntl
 import os
 import tempfile
 import tomllib
-from contextlib import contextmanager
+from collections.abc import Iterator
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 
 class RegistryError(Exception):
@@ -36,7 +37,7 @@ class Registry:
     projects: dict[str, RegistryEntry] = field(default_factory=dict)
 
     @classmethod
-    def load(cls, path: Path) -> "Registry":
+    def load(cls, path: Path) -> Registry:
         if not path.exists():
             return cls(path=path)
         with path.open("rb") as f:
@@ -73,7 +74,7 @@ class Registry:
         _atomic_write_text(self.path, body)
 
     @contextmanager
-    def locked(self) -> Iterator["Registry"]:
+    def locked(self) -> Iterator[Registry]:
         """Hold an exclusive file lock and refresh in-memory state from disk.
 
         Wraps the whole install/uninstall/sync transaction so concurrent spg
@@ -101,7 +102,7 @@ class Registry:
             name=name,
             root=root.resolve(),
             commands=commands,
-            installed_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            installed_at=datetime.now(UTC).isoformat(timespec="seconds"),
         )
         self.projects[name] = entry
         return entry
@@ -157,10 +158,8 @@ def _atomic_write_text(path: Path, content: str) -> None:
     try:
         with os.fdopen(fd, "w") as f:
             f.write(content)
-        os.replace(tmp_path, path)
+        Path(tmp_path).replace(path)
     except Exception:
-        try:
-            os.unlink(tmp_path)
-        except FileNotFoundError:
-            pass
+        with suppress(FileNotFoundError):
+            Path(tmp_path).unlink()
         raise
