@@ -1,0 +1,20 @@
+# spg.toml for spg itself — yes, it self-hosts.
+
+[project]
+name = "spg"
+
+[commands.spg]
+run = "uv run spg"
+description = "Publish per-project commands declared in spg.toml to ~/bin."
+args = [
+    { name = "subcommand", description = "spg subcommand", values = [
+        "init",
+        "install",
+        "uninstall",
+        "sync",
+        "list",
+        "help",
+        "status",
+        "completion",
+    ] },
+]
