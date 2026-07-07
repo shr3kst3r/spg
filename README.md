@@ -98,7 +98,7 @@ authoritative schema and an agent-ready guide to adding `spg` to any project.
 | `spg init` | Write a starter `spg.toml` in the current directory. |
 | `spg install` | Register the project and write `~/bin` wrappers. |
 | `spg uninstall [name]` | Remove a project's wrappers and registry entry. |
-| `spg sync` | Re-read every registered project's `spg.toml` and refresh wrappers. |
+| `spg sync` | Re-read every registered project's `spg.toml`, refresh wrappers, and prune orphaned ones. |
 | `spg list` | Show registered projects and their commands. |
 | `spg help <cmd>` | Show a published command's declared usage. |
 | `spg status` | Diagnose registry / `~/bin` drift. |

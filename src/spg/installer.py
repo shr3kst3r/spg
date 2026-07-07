@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import stat
 import tempfile
+from collections.abc import Collection
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
@@ -302,6 +303,39 @@ def sync_project(
         return _install_project_locked(config, registry, bin_dir, force=False)
 
 
+@dataclass
+class PruneResult:
+    removed: list[str]
+
+
+def prune_orphan_wrappers(
+    registry: Registry,
+    bin_dir: Path,
+    *,
+    skip_projects: Collection[str] = (),
+) -> PruneResult:
+    """Remove spg-managed wrappers that no registered command backs.
+
+    A wrapper is orphaned when its marker names a project that is not in the
+    registry, or a command absent from that project's registry entry — e.g.
+    the project was unregistered without `spg uninstall`, or an interrupted
+    install left a wrapper the registry never recorded. Projects listed in
+    `skip_projects` (ones whose spg.toml could not be read during `spg sync`)
+    are left untouched, as are files without an spg marker.
+    """
+    with registry.locked():
+        removed: list[str] = []
+        for path, meta in list_managed_wrappers(bin_dir):
+            if meta.project in skip_projects:
+                continue
+            entry = registry.projects.get(meta.project)
+            if entry is not None and meta.command in entry.commands:
+                continue
+            path.unlink()
+            removed.append(path.name)
+        return PruneResult(removed=removed)
+
+
 def list_managed_wrappers(bin_dir: Path) -> list[tuple[Path, WrapperMeta]]:
     if not bin_dir.is_dir():
         return []
@@ -316,10 +350,12 @@ def list_managed_wrappers(bin_dir: Path) -> list[tuple[Path, WrapperMeta]]:
 __all__ = [
     "InstallError",
     "InstallResult",
+    "PruneResult",
     "UninstallResult",
     "WrapperMeta",
     "install_project",
     "list_managed_wrappers",
+    "prune_orphan_wrappers",
     "sync_project",
     "uninstall_project",
 ]

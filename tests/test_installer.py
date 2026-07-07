@@ -13,6 +13,7 @@ from spg.installer import (
     InstallError,
     install_project,
     list_managed_wrappers,
+    prune_orphan_wrappers,
     uninstall_project,
 )
 from spg.registry import Registry
@@ -466,6 +467,58 @@ def test_uninstall_shell_function_command_silently(
     # No file ever existed; should not be reported as skipped.
     assert result.removed == []
     assert result.skipped == []
+
+
+def _write_managed_wrapper(bin_dir: Path, name: str, *, project: str, command: str) -> None:
+    (bin_dir / name).write_text(f"#!/bin/sh\n# spg-managed: {project}:{command}\nexec true\n")
+
+
+def test_prune_removes_wrapper_from_unregistered_project(
+    make_project, bin_dir: Path, registry_file: Path
+) -> None:
+    project = make_project("demo")
+    install_project(load_project_config_from_dir(project), Registry.load(registry_file), bin_dir)
+    _write_managed_wrapper(bin_dir, "ghost", project="phantom", command="ghost")
+
+    result = prune_orphan_wrappers(Registry.load(registry_file), bin_dir)
+    assert result.removed == ["ghost"]
+    assert not (bin_dir / "ghost").exists()
+    assert (bin_dir / "hello").exists()
+
+
+def test_prune_removes_wrapper_not_in_registry_entry(
+    make_project, bin_dir: Path, registry_file: Path
+) -> None:
+    project = make_project("demo")
+    install_project(load_project_config_from_dir(project), Registry.load(registry_file), bin_dir)
+    # A wrapper claiming "demo" but never recorded in its registry entry
+    # (e.g. left behind by an interrupted install).
+    _write_managed_wrapper(bin_dir, "stale", project="demo", command="stale")
+
+    result = prune_orphan_wrappers(Registry.load(registry_file), bin_dir)
+    assert result.removed == ["stale"]
+    assert not (bin_dir / "stale").exists()
+    assert (bin_dir / "hello").exists()
+
+
+def test_prune_respects_skip_projects(make_project, bin_dir: Path, registry_file: Path) -> None:
+    project = make_project("demo")
+    install_project(load_project_config_from_dir(project), Registry.load(registry_file), bin_dir)
+    _write_managed_wrapper(bin_dir, "ghost", project="phantom", command="ghost")
+
+    result = prune_orphan_wrappers(Registry.load(registry_file), bin_dir, skip_projects={"phantom"})
+    assert result.removed == []
+    assert (bin_dir / "ghost").exists()
+
+
+def test_prune_ignores_unmanaged_files(make_project, bin_dir: Path, registry_file: Path) -> None:
+    project = make_project("demo")
+    install_project(load_project_config_from_dir(project), Registry.load(registry_file), bin_dir)
+    (bin_dir / "unrelated").write_text("#!/bin/sh\necho hi\n")
+
+    result = prune_orphan_wrappers(Registry.load(registry_file), bin_dir)
+    assert result.removed == []
+    assert (bin_dir / "unrelated").exists()
 
 
 def test_wrapper_quotes_root_with_space(tmp_path: Path, bin_dir: Path, registry_file: Path) -> None:

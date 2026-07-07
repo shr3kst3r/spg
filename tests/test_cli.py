@@ -142,3 +142,42 @@ def test_sync_warns_when_config_missing(
     assert rc == 1
     err = capsys.readouterr().err
     assert "is missing" in err
+
+
+def test_sync_prunes_orphan_wrappers(
+    isolated_env, make_project, capsys: pytest.CaptureFixture[str]
+) -> None:
+    project = make_project("demo")
+    cli.main(["install", "-C", str(project)])
+    (isolated_env["bin_dir"] / "ghost").write_text(
+        "#!/bin/sh\n# spg-managed: phantom:ghost\nexec true\n"
+    )
+    capsys.readouterr()
+
+    rc = cli.main(["sync"])
+    assert rc == 0
+    assert not (isolated_env["bin_dir"] / "ghost").exists()
+    assert (isolated_env["bin_dir"] / "hello").exists()
+    out = capsys.readouterr().out
+    assert "Pruned" in out
+    assert "ghost" in out
+
+
+def test_sync_keeps_wrappers_of_project_that_failed_to_load(
+    isolated_env, make_project, capsys: pytest.CaptureFixture[str]
+) -> None:
+    project = make_project("demo")
+    cli.main(["install", "-C", str(project)])
+    capsys.readouterr()
+
+    # demo's config disappears, and a stale wrapper claims demo ownership;
+    # sync must warn about demo without pruning anything it claims to own.
+    (isolated_env["bin_dir"] / "stale").write_text(
+        "#!/bin/sh\n# spg-managed: demo:stale\nexec true\n"
+    )
+    (project / "spg.toml").unlink()
+
+    rc = cli.main(["sync"])
+    assert rc == 1
+    assert (isolated_env["bin_dir"] / "stale").exists()
+    assert (isolated_env["bin_dir"] / "hello").exists()

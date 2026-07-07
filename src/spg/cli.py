@@ -30,6 +30,7 @@ from spg.installer import (
     InstallResult,
     install_project,
     list_managed_wrappers,
+    prune_orphan_wrappers,
     sync_project,
     uninstall_project,
 )
@@ -175,31 +176,39 @@ def uninstall(name: str | None, directory: str) -> int:
 
 @cli.command()
 def sync() -> int:
-    """Re-read every registered project's spg.toml and refresh ~/bin wrappers."""
+    """Refresh ~/bin wrappers from every registered spg.toml and prune orphans."""
     registry = Registry.load(registry_path())
     if not registry.projects:
         console.print("[dim]No projects registered.[/]")
         return 0
     any_failures = False
+    failed_projects: set[str] = set()
     for entry in list(registry):
         config_file = entry.root / PROJECT_CONFIG_FILENAME
         if not config_file.is_file():
             err_console.print(f"[yellow]warn:[/] {entry.name}: {config_file} is missing; skipping")
             any_failures = True
+            failed_projects.add(entry.name)
             continue
         try:
             config = load_project_config(config_file)
         except ConfigError as exc:
             err_console.print(f"[yellow]warn:[/] {entry.name}: {exc}")
             any_failures = True
+            failed_projects.add(entry.name)
             continue
         try:
             result = sync_project(config, registry, bin_dir())
         except InstallError as exc:
             err_console.print(f"[yellow]warn:[/] {entry.name}: {exc}")
             any_failures = True
+            failed_projects.add(entry.name)
             continue
         _print_install_result(result, verb="Synced")
+    prune_result = prune_orphan_wrappers(registry, bin_dir(), skip_projects=failed_projects)
+    if prune_result.removed:
+        console.print("[bold green]✓[/] Pruned orphaned wrappers.")
+        _print_change_line("-", "red", "removed", prune_result.removed)
     return 1 if any_failures else 0
 
 
@@ -354,13 +363,17 @@ def status() -> int:
     for project, found in by_project.items():
         if project not in registered:
             problems.append(
-                f"orphan wrappers from unregistered project {project!r}: {', '.join(found)}"
+                f"orphan wrappers from unregistered project {project!r}: {', '.join(found)} "
+                "(run `spg sync` to prune)"
             )
             continue
         expected = set(registered[project].commands)
         for cmd in found:
             if cmd not in expected:
-                problems.append(f"wrapper {cmd!r} not declared in {project!r}'s spg.toml")
+                problems.append(
+                    f"wrapper {cmd!r} not declared in {project!r}'s spg.toml "
+                    "(run `spg sync` to prune)"
+                )
 
     if problems:
         items = Text()
