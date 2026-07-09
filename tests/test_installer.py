@@ -184,6 +184,34 @@ def test_wrapper_runs_multiword_command(tmp_path: Path, bin_dir: Path, registry_
     assert result.stdout.strip() == "prefix tail"
 
 
+def test_wrapper_exposes_invocation_dir(tmp_path: Path, bin_dir: Path, registry_file: Path) -> None:
+    """The wrapper cd's into the project root, but a command can still recover
+    the directory the user invoked it from via $SPG_INVOCATION_DIR."""
+    project = tmp_path / "invdir"
+    project.mkdir()
+    (project / "spg.toml").write_text(
+        dedent("""\
+        [project]
+        name = "invdir"
+
+        [commands.where]
+        run = "/bin/sh -c 'echo \\"$SPG_INVOCATION_DIR\\"'"
+    """)
+    )
+    caller = tmp_path / "caller"
+    caller.mkdir()
+    config = load_project_config_from_dir(project)
+    install_project(config, Registry.load(registry_file), bin_dir)
+    result = subprocess.run(
+        [str(bin_dir / "where")],
+        cwd=caller,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert Path(result.stdout.strip()) == caller
+
+
 def test_install_refuses_symlink_in_bin_dir(
     make_project, bin_dir: Path, registry_file: Path, tmp_path: Path
 ) -> None:

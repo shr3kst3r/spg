@@ -77,6 +77,9 @@ Rules in brief:
 - Exactly one of `run` or `shell_function` per command.
 - `run` produces a `~/bin/<name>` wrapper that `cd`s into the repo root and
   runs `sh -c '<run> "$@"'` with your arguments. Use it for normal commands.
+  Before `cd`ing, the wrapper exports `$SPG_INVOCATION_DIR` — the directory you
+  invoked the command from — so a command can act on where you are rather than
+  where it's installed (e.g. `some-tool "${SPG_INVOCATION_DIR:-.}"`).
 - `shell_function` produces a function defined in your interactive shell (it
   can `cd`, `export`, set shell variables — things a subprocess can't).
   Available only in interactive zsh with the completion script sourced.
