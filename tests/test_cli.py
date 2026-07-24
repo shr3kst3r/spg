@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from textwrap import dedent
 
 import pytest
 
@@ -181,3 +182,136 @@ def test_sync_keeps_wrappers_of_project_that_failed_to_load(
     assert rc == 1
     assert (isolated_env["bin_dir"] / "stale").exists()
     assert (isolated_env["bin_dir"] / "hello").exists()
+
+
+# --- [links] ---------------------------------------------------------------
+
+
+def link_config(project: Path, home: Path, target: str = "{home}/.claude/skills/") -> None:
+    skill = project / "skills" / "my-skill"
+    skill.mkdir(parents=True, exist_ok=True)
+    (skill / "SKILL.md").write_text("# skill\n")
+    (project / "spg.toml").write_text(
+        dedent(f"""\
+            [project]
+            name = "demo"
+
+            [commands.hello]
+            run = "./scripts/hello.sh"
+
+            [links.my-skill]
+            source = "skills/my-skill"
+            target = "{target.format(home=home)}"
+            description = "Publish the skill"
+        """)
+    )
+
+
+def test_install_status_uninstall_with_links(
+    isolated_env, make_project, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    project = make_project("demo")
+    home = tmp_path / "home"
+    link_config(project, home)
+
+    assert cli.main(["install", "-C", str(project)]) == 0
+    out = capsys.readouterr().out
+    assert "linked" in out and "my-skill" in out
+    link = home / ".claude" / "skills" / "my-skill"
+    assert link.is_symlink()
+
+    assert cli.main(["list"]) == 0
+    out = capsys.readouterr().out
+    assert "Links" in out
+    assert "my-skill" in out
+    assert "1 link" in out
+
+    assert cli.main(["status"]) == 0
+    out = capsys.readouterr().out
+    assert "Managed links" in out
+    assert "All good" in out
+
+    assert cli.main(["uninstall", "demo"]) == 0
+    out = capsys.readouterr().out
+    assert "unlinked" in out
+    assert not link.exists()
+
+
+def test_status_reports_missing_and_repointed_links(
+    isolated_env, make_project, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    project = make_project("demo")
+    home = tmp_path / "home"
+    link_config(project, home)
+    assert cli.main(["install", "-C", str(project)]) == 0
+    capsys.readouterr()
+    link = home / ".claude" / "skills" / "my-skill"
+
+    # Repointed by hand.
+    link.unlink()
+    link.symlink_to(tmp_path / "elsewhere")
+    assert cli.main(["status"]) == 1
+    assert "points at" in capsys.readouterr().out
+
+    # Gone entirely.
+    link.unlink()
+    assert cli.main(["status"]) == 1
+    assert "missing link" in capsys.readouterr().out
+
+    # sync puts it back.
+    assert cli.main(["sync"]) == 0
+    capsys.readouterr()
+    assert cli.main(["status"]) == 0
+    assert "All good" in capsys.readouterr().out
+
+
+def test_status_reports_stale_registered_link(
+    isolated_env, make_project, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    project = make_project("demo")
+    home = tmp_path / "home"
+    link_config(project, home)
+    assert cli.main(["install", "-C", str(project)]) == 0
+    capsys.readouterr()
+
+    # Drop the link declaration without syncing.
+    (project / "spg.toml").write_text(
+        dedent("""\
+            [project]
+            name = "demo"
+
+            [commands.hello]
+            run = "./scripts/hello.sh"
+        """)
+    )
+    assert cli.main(["status"]) == 1
+    assert "stale link" in capsys.readouterr().out
+
+    assert cli.main(["sync"]) == 0
+    capsys.readouterr()
+    assert cli.main(["status"]) == 0
+    assert not (home / ".claude" / "skills" / "my-skill").exists()
+
+
+def test_install_error_message_names_the_link_table(
+    isolated_env, make_project, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Error text keeps its TOML table names instead of losing them to rich markup."""
+    project = make_project("demo")
+    home = tmp_path / "home"
+    (home / "skills").mkdir(parents=True)
+    link_config(project, home, target="{home}/skills")
+
+    assert cli.main(["install", "-C", str(project)]) == 1
+    err = capsys.readouterr().err
+    assert "[links.my-skill].target" in err
+
+
+def test_config_error_keeps_command_table_name(
+    isolated_env, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    project = tmp_path / "broken"
+    project.mkdir()
+    (project / "spg.toml").write_text('[project]\nname = "broken"\n\n[commands.oops]\nrun = 1\n')
+    assert cli.main(["install", "-C", str(project)]) == 1
+    assert "[commands.oops].run must be a string" in capsys.readouterr().err

@@ -10,8 +10,9 @@ declarations.
 Your job has three parts:
 
 1. **Survey** the project to identify the commands worth publishing.
-2. **Author `spg.toml`** at the repo root with `[project]` and one
-   `[commands.<name>]` table per command.
+2. **Author `spg.toml`** at the repo root with `[project]`, one
+   `[commands.<name>]` table per command, and a `[links.<name>]` table for any
+   repo content that belongs at a fixed path on the machine (skills, configs).
 3. **Wire full support** — make sure the commands actually run end-to-end from
    `~/bin`, give them rich completion (`args` with `values`/`type`, or a
    dynamic `complete_hook`), and verify with `spg install` + `spg help`.
@@ -28,6 +29,8 @@ project scripts that implement `complete_hook` callbacks.
   - writes a `~/bin/<cmd>` wrapper script (when `run` is set), or
   - registers it as a **shell function** to be defined eagerly in the user's
     interactive shell (when `shell_function` is set).
+- It also creates a symlink for each optional `[links.<name>]` table, for repo
+  content that a tool expects to find at a fixed path on the machine.
 - Each wrapper `cd`s into the project root and runs:
   `sh -c '<run> "$@"' spg <user-args>`. So `run` is plain shell — it can be a
   script path, `make <target>`, `uv run …`, `npm run …`, whatever.
@@ -76,6 +79,17 @@ complete_hook = "./scripts/deploy.sh __complete"   # optional; see below
 description = "cd into a worktree resolved by ./scripts/resolve.sh"
 shell_function = 'cd "$(./scripts/resolve.sh "$@")"'
 complete_hook = "./scripts/resolve.sh __complete"
+
+# --- Symlinks (optional) --------------------------------------------------
+# One [links.<name>] table per symlink this project publishes.
+[links.my-skill]
+source = "skills/my-skill"     # required; path relative to the repo root,
+                               # must exist, must not contain '..'
+target = "~/.claude/skills/"   # required; absolute ('~' expanded).
+                               # Trailing '/' → link INTO that directory with
+                               # <name> as the leaf. No trailing '/' → target
+                               # is the exact path of the symlink.
+description = "Publish this repo's skill to Claude Code"   # optional
 ```
 
 Rules:
@@ -104,6 +118,16 @@ Rules:
   - `value:description` accepted; bare `value` also accepted.
   - Two special sentinel outputs: `__files__` → file completion; `__directories__` → directory completion.
 - Wrapper scripts are deterministic and contain a `# spg-managed:<project>:<command>` marker; do not edit `~/bin/<cmd>` by hand.
+- `[links.<name>]` is for repo content a tool expects at a fixed path — a
+  Claude Code skill in `~/.claude/skills/`, an editor or CLI config, a
+  dotfile. `<name>` may look like a filename (`.zshrc`, `1password`) but
+  cannot be `.` or `..`. Missing parent directories of `target` are created.
+  Links are created/repaired by `spg install` and `spg sync`, and removed by
+  `spg uninstall` — spg only deletes a path it recorded that is still a
+  symlink, so it never removes your own files. A foreign symlink or regular
+  file sitting at a link's path requires `--force`; a real directory there is
+  refused outright (add a trailing `/` to `target` if you meant to link into
+  it). Don't declare a link whose `target` lands on a `~/bin/<cmd>` wrapper.
 - When you change a `shell_function` body (or switch a command between `run`
   and `shell_function`), the user needs a fresh shell (or to re-source their
   completion script) for the change to take effect. `spg sync` updates the
@@ -224,11 +248,15 @@ plain `value\n` or `value:description\n` lines.
 Run, in order, from the project root:
 
 ```sh
-spg install      # writes ~/bin/<cmd> wrappers and registers the project
-spg list         # confirm the project and command list
+spg install      # writes ~/bin/<cmd> wrappers, creates links, registers the project
+spg list         # confirm the project, command list, and links
 spg help <cmd>   # for each declared command — verify description + args
+spg status       # confirm no wrapper/link drift
 <cmd> --help     # if the underlying command supports it — sanity check it actually runs
 ```
+
+For each declared link, confirm the symlink landed where you meant it to
+(`ls -l <target>`) and that reading through it reaches the repo content.
 
 If `spg install` errors about a non-spg file already at `~/bin/<cmd>`, the
 correct fix is almost always to **rename the spg command** (the user's

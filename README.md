@@ -70,6 +70,17 @@ complete_hook = "./scripts/deploy.sh __complete"   # optional dynamic completion
 [commands.gocd]
 description = "cd into a resolved worktree"
 shell_function = 'cd "$(./scripts/resolve.sh "$@")"'
+
+# Symlinks — publish a path in this repo to somewhere on your machine.
+[links.my-skill]
+source = "skills/my-skill"      # relative to the repo root
+target = "~/.claude/skills/"    # trailing slash: link *into* this directory,
+                                # leaf name = the table name ("my-skill")
+description = "Publish this repo's skill to Claude Code"
+
+[links.rgconf]
+source = "config/ripgreprc"
+target = "~/.config/ripgrep/config"   # no trailing slash: the exact link path
 ```
 
 Rules in brief:
@@ -90,6 +101,14 @@ Rules in brief:
   hostnames, etc.) when static `args` can't. It's invoked as
   `<hook> <position> <words…>` and prints one `value[:description]` per line;
   the sentinels `__files__` / `__directories__` request path completion.
+- `[links.<name>]` symlinks `source` (a path inside the repo) to `target`. Use
+  it to publish repo content that a tool expects to find in a fixed location —
+  a Claude Code skill in `~/.claude/skills/`, a dotfile, an editor config.
+  `source` must be relative to the repo root and must exist; `target` must be
+  absolute (`~` is expanded). A `target` ending in `/` means "link into that
+  directory" with `<name>` as the leaf; otherwise `target` is the link itself.
+  Missing parent directories are created. Links are created, repaired, and
+  removed by `spg install` / `sync` / `uninstall` alongside wrappers.
 
 See [`prompts/add-spg-support.md`](prompts/add-spg-support.md) for the full,
 authoritative schema and an agent-ready guide to adding `spg` to any project.
@@ -99,18 +118,19 @@ authoritative schema and an agent-ready guide to adding `spg` to any project.
 | Command | What it does |
 | --- | --- |
 | `spg init` | Write a starter `spg.toml` in the current directory. |
-| `spg install` | Register the project and write `~/bin` wrappers. |
-| `spg uninstall [name]` | Remove a project's wrappers and registry entry. |
-| `spg sync` | Re-read every registered project's `spg.toml`, refresh wrappers, and prune orphaned ones. |
-| `spg list` | Show registered projects and their commands. |
+| `spg install` | Register the project, write `~/bin` wrappers, and create declared links. |
+| `spg uninstall [name]` | Remove a project's wrappers, links, and registry entry. |
+| `spg sync` | Re-read every registered project's `spg.toml`, refresh wrappers and links, and prune orphaned ones. |
+| `spg list` | Show registered projects with their commands and links. |
 | `spg help <cmd>` | Show a published command's declared usage. |
-| `spg status` | Diagnose registry / `~/bin` drift. |
+| `spg status` | Diagnose registry / `~/bin` / link drift. |
 | `spg completion zsh` | Print the zsh completion script. |
 
 ## How it works
 
 - The registry lives at `~/.config/spg/registry.toml` (respects
-  `XDG_CONFIG_HOME`). It records each project's root and its commands.
+  `XDG_CONFIG_HOME`). It records each project's root, its commands, and the
+  links it published, plus a `version` marking the file's format.
 - Wrappers are written to `~/bin/<cmd>`. Each carries a
   `# spg-managed:<project>:<command>` marker so `spg` knows which files it owns
   — don't edit them by hand. Wrapper and registry writes are atomic, and the
@@ -118,6 +138,10 @@ authoritative schema and an agent-ready guide to adding `spg` to any project.
   invocations can't corrupt it.
 - `spg install` refuses to clobber a non-spg file or another project's command;
   pass `--force` only to overwrite a non-spg `~/bin/<cmd>`.
+- Links get the same treatment: spg only ever removes a path it recorded *and*
+  that is still a symlink, so it can't delete your files. A foreign symlink or
+  regular file at a link's path needs `--force`; a real directory there is
+  refused outright, even with `--force`.
 - Completion dispatches into a hidden `spg __complete` command at completion
   time, so registry/`spg.toml` edits show up in your next shell automatically.
 

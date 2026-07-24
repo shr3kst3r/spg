@@ -575,3 +575,401 @@ def test_wrapper_quotes_root_with_space(tmp_path: Path, bin_dir: Path, registry_
         check=True,
     )
     assert result.stdout.strip() == "yes ok"
+
+
+# --- [links] ---------------------------------------------------------------
+
+
+def link_project(make_project, name: str = "demo", links_toml: str = "") -> Path:
+    """A project with one wrapper command plus the given [links] tables."""
+    project = make_project(
+        name,
+        dedent("""\
+            [commands.hello]
+            run = "./scripts/hello.sh"
+        """)
+        + links_toml,
+    )
+    skill = project / "skills" / "my-skill"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text("# skill\n")
+    (project / "note.txt").write_text("hi\n")
+    return project
+
+
+def test_install_creates_links(make_project, bin_dir: Path, registry_file: Path, tmp_path: Path):
+    home = tmp_path / "home"
+    project = link_project(
+        make_project,
+        links_toml=dedent(f"""\
+            [links.my-skill]
+            source = "skills/my-skill"
+            target = "{home}/.claude/skills/"
+
+            [links.note]
+            source = "note.txt"
+            target = "{home}/note-link.txt"
+        """),
+    )
+    config = load_project_config_from_dir(project)
+    registry = Registry.load(registry_file)
+
+    result = install_project(config, registry, bin_dir)
+    assert result.links_written == ["my-skill", "note"]
+    assert result.links_relinked == []
+
+    # Parent directories are created on demand.
+    skill_link = home / ".claude" / "skills" / "my-skill"
+    assert skill_link.is_symlink()
+    assert skill_link.readlink() == project.resolve() / "skills" / "my-skill"
+    assert (skill_link / "SKILL.md").read_text() == "# skill\n"
+
+    note_link = home / "note-link.txt"
+    assert note_link.is_symlink()
+    assert note_link.read_text() == "hi\n"
+
+    entry = Registry.load(registry_file).projects["demo"]
+    assert [link.name for link in entry.links] == ["my-skill", "note"]
+    assert entry.link(skill_link) is not None
+
+
+def test_install_links_are_idempotent(
+    make_project, bin_dir: Path, registry_file: Path, tmp_path: Path
+):
+    home = tmp_path / "home"
+    project = link_project(
+        make_project,
+        links_toml=dedent(f"""\
+            [links.my-skill]
+            source = "skills/my-skill"
+            target = "{home}/.claude/skills/"
+        """),
+    )
+    config = load_project_config_from_dir(project)
+    registry = Registry.load(registry_file)
+
+    install_project(config, registry, bin_dir)
+    result = install_project(config, registry, bin_dir)
+    assert result.links_written == []
+    assert result.links_relinked == []
+    assert (home / ".claude" / "skills" / "my-skill").is_symlink()
+
+
+def test_install_repoints_our_own_stale_link(
+    make_project, bin_dir: Path, registry_file: Path, tmp_path: Path
+):
+    home = tmp_path / "home"
+    project = link_project(
+        make_project,
+        links_toml=dedent(f"""\
+            [links.thing]
+            source = "skills/my-skill"
+            target = "{home}/thing"
+        """),
+    )
+    registry = Registry.load(registry_file)
+    install_project(load_project_config_from_dir(project), registry, bin_dir)
+
+    # Someone repoints our link by hand; sync/install puts it back.
+    link = home / "thing"
+    link.unlink()
+    link.symlink_to(project / "note.txt")
+
+    result = install_project(load_project_config_from_dir(project), registry, bin_dir)
+    assert result.links_relinked == ["thing"]
+    assert link.readlink() == project.resolve() / "skills" / "my-skill"
+
+
+def test_install_accepts_equivalent_existing_link(
+    make_project, bin_dir: Path, registry_file: Path, tmp_path: Path
+):
+    """A hand-made link that already resolves to the source is not a conflict.
+
+    Here the existing link is *relative*, so its value differs from the absolute
+    path spg writes while pointing at the same place. spg canonicalizes it
+    instead of reporting a foreign-symlink conflict.
+    """
+    home = tmp_path / "home"
+    project = link_project(
+        make_project,
+        links_toml=dedent(f"""\
+            [links.thing]
+            source = "skills/my-skill"
+            target = "{home}/thing"
+        """),
+    )
+    source = project.resolve() / "skills" / "my-skill"
+    home.mkdir(parents=True)
+    relative = Path(os.path.relpath(source, home))
+    assert str(relative).startswith("..")
+    (home / "thing").symlink_to(relative)
+
+    result = install_project(
+        load_project_config_from_dir(project), Registry.load(registry_file), bin_dir
+    )
+    assert result.links_relinked == ["thing"]
+    assert (home / "thing").readlink() == source
+
+
+def test_install_refuses_foreign_symlink_without_force(
+    make_project, bin_dir: Path, registry_file: Path, tmp_path: Path
+):
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "thing").symlink_to(tmp_path / "somewhere-else")
+    project = link_project(
+        make_project,
+        links_toml=dedent(f"""\
+            [links.thing]
+            source = "skills/my-skill"
+            target = "{home}/thing"
+        """),
+    )
+    config = load_project_config_from_dir(project)
+
+    with pytest.raises(InstallError, match="refusing to repoint it"):
+        install_project(config, Registry.load(registry_file), bin_dir)
+
+    result = install_project(config, Registry.load(registry_file), bin_dir, force=True)
+    assert result.links_relinked == ["thing"]
+    assert (home / "thing").readlink() == project.resolve() / "skills" / "my-skill"
+
+
+def test_install_refuses_regular_file_without_force(
+    make_project, bin_dir: Path, registry_file: Path, tmp_path: Path
+):
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "thing").write_text("precious\n")
+    project = link_project(
+        make_project,
+        links_toml=dedent(f"""\
+            [links.thing]
+            source = "skills/my-skill"
+            target = "{home}/thing"
+        """),
+    )
+    config = load_project_config_from_dir(project)
+
+    with pytest.raises(InstallError, match="not managed by spg"):
+        install_project(config, Registry.load(registry_file), bin_dir)
+    assert (home / "thing").read_text() == "precious\n"
+
+    install_project(config, Registry.load(registry_file), bin_dir, force=True)
+    assert (home / "thing").is_symlink()
+
+
+def test_install_never_replaces_a_real_directory(
+    make_project, bin_dir: Path, registry_file: Path, tmp_path: Path
+):
+    home = tmp_path / "home"
+    (home / "thing").mkdir(parents=True)
+    (home / "thing" / "keep.txt").write_text("keep\n")
+    project = link_project(
+        make_project,
+        links_toml=dedent(f"""\
+            [links.thing]
+            source = "skills/my-skill"
+            target = "{home}/thing"
+        """),
+    )
+    config = load_project_config_from_dir(project)
+
+    # Not even --force may delete a real directory.
+    for force in (False, True):
+        with pytest.raises(InstallError, match="is a directory; refusing to replace it"):
+            install_project(config, Registry.load(registry_file), bin_dir, force=force)
+    assert (home / "thing" / "keep.txt").read_text() == "keep\n"
+
+
+def test_directory_conflict_hints_at_trailing_slash(
+    make_project, bin_dir: Path, registry_file: Path, tmp_path: Path
+):
+    home = tmp_path / "home"
+    (home / "skills").mkdir(parents=True)
+    project = link_project(
+        make_project,
+        links_toml=dedent(f"""\
+            [links.my-skill]
+            source = "skills/my-skill"
+            target = "{home}/skills"
+        """),
+    )
+    config = load_project_config_from_dir(project)
+    with pytest.raises(InstallError, match=r"\[links.my-skill\].target"):
+        install_project(config, Registry.load(registry_file), bin_dir)
+
+
+def test_install_rejects_missing_source(
+    make_project, bin_dir: Path, registry_file: Path, tmp_path: Path
+):
+    home = tmp_path / "home"
+    project = link_project(
+        make_project,
+        links_toml=dedent(f"""\
+            [links.typo]
+            source = "skils/my-skill"
+            target = "{home}/x"
+        """),
+    )
+    config = load_project_config_from_dir(project)
+    with pytest.raises(InstallError, match="does not exist"):
+        install_project(config, Registry.load(registry_file), bin_dir)
+
+
+def test_link_cannot_collide_with_another_projects_link(
+    make_project, bin_dir: Path, registry_file: Path, tmp_path: Path
+):
+    home = tmp_path / "home"
+    links = dedent(f"""\
+        [links.shared]
+        source = "skills/my-skill"
+        target = "{home}/shared"
+    """)
+    first = link_project(make_project, "one", links)
+    second = link_project(make_project, "two", links)
+    registry = Registry.load(registry_file)
+
+    install_project(load_project_config_from_dir(first), registry, bin_dir)
+    with pytest.raises(InstallError, match="already published by project 'one'"):
+        install_project(load_project_config_from_dir(second), registry, bin_dir)
+
+
+def test_link_cannot_collide_with_own_wrapper(make_project, bin_dir: Path, registry_file: Path):
+    project = link_project(
+        make_project,
+        links_toml=dedent(f"""\
+            [links.hello]
+            source = "skills/my-skill"
+            target = "{bin_dir}/hello"
+        """),
+    )
+    config = load_project_config_from_dir(project)
+    with pytest.raises(InstallError, match="also the wrapper path"):
+        install_project(config, Registry.load(registry_file), bin_dir)
+
+
+def test_link_refuses_to_replace_another_projects_wrapper(
+    make_project, bin_dir: Path, registry_file: Path
+):
+    other = make_project("other", '[commands.othercmd]\nrun = "./scripts/hello.sh"\n')
+    registry = Registry.load(registry_file)
+    install_project(load_project_config_from_dir(other), registry, bin_dir)
+
+    project = link_project(
+        make_project,
+        links_toml=dedent(f"""\
+            [links.othercmd]
+            source = "skills/my-skill"
+            target = "{bin_dir}/othercmd"
+        """),
+    )
+    with pytest.raises(InstallError, match="is the spg wrapper for command"):
+        install_project(load_project_config_from_dir(project), registry, bin_dir)
+
+
+def test_install_removes_links_no_longer_declared(
+    make_project, bin_dir: Path, registry_file: Path, tmp_path: Path
+):
+    home = tmp_path / "home"
+    project = link_project(
+        make_project,
+        links_toml=dedent(f"""\
+            [links.keep]
+            source = "skills/my-skill"
+            target = "{home}/keep"
+
+            [links.drop]
+            source = "note.txt"
+            target = "{home}/drop"
+        """),
+    )
+    registry = Registry.load(registry_file)
+    install_project(load_project_config_from_dir(project), registry, bin_dir)
+    assert (home / "drop").is_symlink()
+
+    (project / "spg.toml").write_text(
+        dedent(f"""\
+            [project]
+            name = "demo"
+
+            [commands.hello]
+            run = "./scripts/hello.sh"
+
+            [links.keep]
+            source = "skills/my-skill"
+            target = "{home}/keep"
+        """)
+    )
+    result = install_project(load_project_config_from_dir(project), registry, bin_dir)
+    assert result.links_removed == ["drop"]
+    assert not (home / "drop").exists()
+    assert (home / "keep").is_symlink()
+
+    entry = Registry.load(registry_file).projects["demo"]
+    assert [link.name for link in entry.links] == ["keep"]
+
+
+def test_uninstall_removes_links(make_project, bin_dir: Path, registry_file: Path, tmp_path: Path):
+    home = tmp_path / "home"
+    project = link_project(
+        make_project,
+        links_toml=dedent(f"""\
+            [links.my-skill]
+            source = "skills/my-skill"
+            target = "{home}/.claude/skills/"
+        """),
+    )
+    registry = Registry.load(registry_file)
+    install_project(load_project_config_from_dir(project), registry, bin_dir)
+    link = home / ".claude" / "skills" / "my-skill"
+    assert link.is_symlink()
+
+    result = uninstall_project("demo", registry, bin_dir)
+    assert result.links_removed == ["my-skill"]
+    assert not link.exists()
+    # The linked-to content is untouched.
+    assert (project / "skills" / "my-skill" / "SKILL.md").exists()
+    # And the directory we created for it stays put.
+    assert link.parent.is_dir()
+
+
+def test_uninstall_keeps_paths_that_are_no_longer_symlinks(
+    make_project, bin_dir: Path, registry_file: Path, tmp_path: Path
+):
+    home = tmp_path / "home"
+    project = link_project(
+        make_project,
+        links_toml=dedent(f"""\
+            [links.thing]
+            source = "skills/my-skill"
+            target = "{home}/thing"
+        """),
+    )
+    registry = Registry.load(registry_file)
+    install_project(load_project_config_from_dir(project), registry, bin_dir)
+
+    # Someone replaced our symlink with real content.
+    (home / "thing").unlink()
+    (home / "thing").write_text("mine now\n")
+
+    result = uninstall_project("demo", registry, bin_dir)
+    assert result.links_removed == []
+    assert result.links_skipped == ["thing"]
+    assert (home / "thing").read_text() == "mine now\n"
+
+
+def test_link_write_is_atomic_and_leaves_no_temp_files(
+    make_project, bin_dir: Path, registry_file: Path, tmp_path: Path
+):
+    home = tmp_path / "home"
+    project = link_project(
+        make_project,
+        links_toml=dedent(f"""\
+            [links.thing]
+            source = "skills/my-skill"
+            target = "{home}/thing"
+        """),
+    )
+    install_project(load_project_config_from_dir(project), Registry.load(registry_file), bin_dir)
+    assert [p.name for p in home.iterdir()] == ["thing"]

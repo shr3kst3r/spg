@@ -5,13 +5,23 @@ import stat
 import tempfile
 from collections.abc import Collection
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Literal
 
-from spg.config import Command, ProjectConfig
-from spg.registry import Registry
+from spg.config import Command, Link, ProjectConfig
+from spg.registry import Registry, RegistryLink
 
 WRAPPER_MARKER = "# spg-managed:"
+
+# State of the filesystem where a declared link wants to live.
+#   missing    — nothing there; safe to create
+#   current    — a symlink already pointing exactly at the declared source
+#   equivalent — a symlink resolving to the declared source by another path
+#   foreign    — a symlink pointing somewhere else
+#   file/dir   — a regular file / real directory sits in the way
+#   other      — something else entirely (fifo, socket, …)
+LinkState = Literal["missing", "current", "equivalent", "foreign", "file", "dir", "other"]
 
 
 class InstallError(Exception):
@@ -30,6 +40,9 @@ class InstallResult:
     written: list[str]
     removed: list[str]
     refreshed: list[str]
+    links_written: list[str] = field(default_factory=list)
+    links_relinked: list[str] = field(default_factory=list)
+    links_removed: list[str] = field(default_factory=list)
 
 
 def install_project(
@@ -39,15 +52,19 @@ def install_project(
     *,
     force: bool = False,
 ) -> InstallResult:
-    """Materialize wrappers for `config` into `bin_dir` and update the registry.
+    """Materialize wrappers and links for `config` and update the registry.
 
     Detects conflicts against:
       - existing non-spg files in bin_dir (error unless force=True)
       - spg wrappers owned by a different registered project (always an error)
       - symlinks at the wrapper path (error unless force=True; even with force,
         the symlink dirent is atomically replaced rather than followed)
+      - declared `[links]` whose path is taken by a foreign symlink or file
+        (error unless force=True), by a real directory (always an error), or by
+        a link another project already publishes (always an error)
 
-    Removes any wrappers from a prior install of this project that no longer appear in config.
+    Removes any wrappers and links from a prior install of this project that no
+    longer appear in config.
     """
     bin_dir.mkdir(parents=True, exist_ok=True)
     with registry.locked():
@@ -97,6 +114,20 @@ def _install_project_locked(
         else:
             written.append(cmd.name)
 
+    links_written: list[str] = []
+    links_relinked: list[str] = []
+    for link in config.links:
+        link_path = link.link_path
+        source = link.source_path(config.root)
+        state = _link_state(link_path, source)
+        if state == "current":
+            continue
+        _write_symlink(link_path, source)
+        if state == "missing":
+            links_written.append(link.name)
+        else:
+            links_relinked.append(link.name)
+
     removed: list[str] = []
     # Remove any wrappers we previously owned that no longer want one — either
     # because the command was deleted, or because it switched to shell_function.
@@ -109,7 +140,21 @@ def _install_project_locked(
             wrapper_path.unlink()
             removed.append(orphan)
 
-    registry.upsert(config.name, config.root, new_command_names)
+    # Same for links this project used to publish but no longer declares.
+    declared_link_paths = {link.link_path for link in config.links}
+    links_removed: list[str] = []
+    for prev_link in previous_entry.links if previous_entry else ():
+        if prev_link.path in declared_link_paths:
+            continue
+        if _remove_symlink(prev_link.path):
+            links_removed.append(prev_link.name)
+
+    registry.upsert(
+        config.name,
+        config.root,
+        new_command_names,
+        links=tuple(RegistryLink(name=link.name, path=link.link_path) for link in config.links),
+    )
     registry.save()
 
     return InstallResult(
@@ -117,6 +162,9 @@ def _install_project_locked(
         written=written,
         removed=removed,
         refreshed=refreshed,
+        links_written=links_written,
+        links_relinked=links_relinked,
+        links_removed=links_removed,
     )
 
 
@@ -125,6 +173,8 @@ class UninstallResult:
     project: str
     removed: list[str]
     skipped: list[str]
+    links_removed: list[str] = field(default_factory=list)
+    links_skipped: list[str] = field(default_factory=list)
 
 
 def uninstall_project(
@@ -154,9 +204,29 @@ def uninstall_project(
             wrapper_path.unlink()
             removed.append(cmd_name)
 
+        links_removed: list[str] = []
+        links_skipped: list[str] = []
+        for link in entry.links:
+            st = _lstat_or_none(link.path)
+            if st is None:
+                continue
+            if not stat.S_ISLNK(st.st_mode):
+                # Something replaced our symlink with a real file or directory;
+                # leave it alone rather than deleting data we don't own.
+                links_skipped.append(link.name)
+                continue
+            link.path.unlink()
+            links_removed.append(link.name)
+
         registry.remove(project_name)
         registry.save()
-        return UninstallResult(project=project_name, removed=removed, skipped=skipped)
+        return UninstallResult(
+            project=project_name,
+            removed=removed,
+            skipped=skipped,
+            links_removed=links_removed,
+            links_skipped=links_skipped,
+        )
 
 
 def _check_conflicts(
@@ -209,8 +279,81 @@ def _check_conflicts(
                 f"command {cmd.name!r} is already provided by project {meta.project!r} "
                 f"({wrapper_path}). Rename it in spg.toml or uninstall the other project."
             )
+    errors.extend(_link_conflicts(config, registry, bin_dir, force=force))
     if errors:
         raise InstallError("\n  - ".join(["install would fail:", *errors]))
+
+
+def _link_conflicts(
+    config: ProjectConfig,
+    registry: Registry,
+    bin_dir: Path,
+    *,
+    force: bool,
+) -> list[str]:
+    """Reasons the `[links]` in `config` cannot be materialized safely."""
+    errors: list[str] = []
+    previous_entry = registry.projects.get(config.name)
+    planned_wrappers = {bin_dir / c.name for c in config.commands if not c.is_shell_function}
+
+    for link in config.links:
+        link_path = link.link_path
+        source = link.source_path(config.root)
+        if _lstat_or_none(source) is None:
+            errors.append(
+                f"link {link.name!r}: source {source} does not exist "
+                f"(relative to the project root {config.root})"
+            )
+            continue
+        if link_path in planned_wrappers:
+            errors.append(
+                f"link {link.name!r} would be created at {link_path}, which is also the wrapper "
+                "path for a command in this project. Rename one of them."
+            )
+            continue
+        owner = registry.find_owner_of_link(link_path)
+        if owner is not None and owner.name != config.name:
+            errors.append(f"{link_path} is already published by project {owner.name!r}")
+            continue
+
+        state = _link_state(link_path, source)
+        if state in ("missing", "current", "equivalent"):
+            continue
+        if state == "foreign":
+            was_ours = previous_entry is not None and previous_entry.link(link_path) is not None
+            if was_ours or force:
+                continue
+            errors.append(
+                f"{link_path} is an existing symlink to {_readlink_or_unknown(link_path)}; "
+                "refusing to repoint it. Remove it manually, or pass --force."
+            )
+            continue
+        if state == "dir":
+            hint = ""
+            if not link.target_is_dir:
+                hint = (
+                    f" If you meant to link into it, write "
+                    f'[links.{link.name}].target = "{link.target}/" (trailing slash).'
+                )
+            errors.append(f"{link_path} is a directory; refusing to replace it.{hint}")
+            continue
+        if state == "file":
+            meta = _read_wrapper_meta(link_path)
+            if meta is not None:
+                errors.append(
+                    f"{link_path} is the spg wrapper for command {meta.command!r} of project "
+                    f"{meta.project!r}; refusing to replace it with a link."
+                )
+            elif not force:
+                errors.append(
+                    f"{link_path} exists and is not managed by spg; pass --force to replace it"
+                )
+            continue
+        errors.append(
+            f"{link_path} exists and is neither a regular file nor a symlink; "
+            "refusing to replace it."
+        )
+    return errors
 
 
 def _write_wrapper(path: Path, *, project: str, command: Command, root: Path) -> None:
@@ -252,6 +395,76 @@ def _render_wrapper(*, project: str, command: Command, root: Path) -> str:
         f"cd {quoted_root} || exit 1\n"
         f'exec /bin/sh -c {quoted_inner} spg "$@"\n'
     )
+
+
+def _write_symlink(link_path: Path, source: Path) -> None:
+    """Atomically (re)create `link_path` as a symlink to `source`.
+
+    Creates missing parent directories, then symlinks a private temp name and
+    renames it into place, so an existing symlink's dirent is replaced rather
+    than followed (and no half-written state is ever visible).
+    """
+    parent = link_path.parent
+    parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_path_str = tempfile.mkstemp(prefix=".spg-link-", dir=str(parent))
+    os.close(fd)
+    tmp_path = Path(tmp_path_str)
+    try:
+        # mkstemp made a regular file; free the (private) name for symlink(2).
+        tmp_path.unlink()
+        tmp_path.symlink_to(source)
+        tmp_path.replace(link_path)
+    except Exception:
+        with suppress(FileNotFoundError):
+            tmp_path.unlink()
+        raise
+
+
+def _remove_symlink(path: Path) -> bool:
+    """Unlink `path` if it is a symlink. Returns whether it was removed."""
+    st = _lstat_or_none(path)
+    if st is None or not stat.S_ISLNK(st.st_mode):
+        return False
+    try:
+        path.unlink()
+    except OSError:
+        return False
+    return True
+
+
+def _link_state(link_path: Path, source: Path) -> LinkState:
+    st = _lstat_or_none(link_path)
+    if st is None:
+        return "missing"
+    if stat.S_ISLNK(st.st_mode):
+        current = _readlink_or_unknown(link_path)
+        if current == str(source):
+            return "current"
+        if _points_at(link_path, current, source):
+            return "equivalent"
+        return "foreign"
+    if stat.S_ISDIR(st.st_mode):
+        return "dir"
+    if stat.S_ISREG(st.st_mode):
+        return "file"
+    return "other"
+
+
+def _points_at(link_path: Path, current: str, source: Path) -> bool:
+    """Whether a symlink's existing value resolves to the same place as `source`.
+
+    Catches hand-made links that name the source by a different but equivalent
+    path, so we treat them as already-correct instead of a foreign conflict.
+    """
+    # A relative link value resolves against the directory holding the link.
+    return (link_path.parent / current).resolve() == source.resolve()
+
+
+def _readlink_or_unknown(path: Path) -> str:
+    try:
+        return str(path.readlink())
+    except OSError:
+        return "<unreadable>"
 
 
 def _sh_single_quote(value: str) -> str:
@@ -341,6 +554,11 @@ def prune_orphan_wrappers(
         return PruneResult(removed=removed)
 
 
+def link_state(link: Link, root: Path) -> LinkState:
+    """Public wrapper: what the filesystem holds where `link` wants to live."""
+    return _link_state(link.link_path, link.source_path(root))
+
+
 def list_managed_wrappers(bin_dir: Path) -> list[tuple[Path, WrapperMeta]]:
     if not bin_dir.is_dir():
         return []
@@ -355,10 +573,12 @@ def list_managed_wrappers(bin_dir: Path) -> list[tuple[Path, WrapperMeta]]:
 __all__ = [
     "InstallError",
     "InstallResult",
+    "LinkState",
     "PruneResult",
     "UninstallResult",
     "WrapperMeta",
     "install_project",
+    "link_state",
     "list_managed_wrappers",
     "prune_orphan_wrappers",
     "sync_project",

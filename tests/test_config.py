@@ -283,3 +283,167 @@ def test_arg_cannot_set_both_type_and_values(tmp_path: Path) -> None:
     )
     with pytest.raises(ConfigError, match="cannot set both"):
         load_project_config_from_dir(tmp_path)
+
+
+# --- [links] ---------------------------------------------------------------
+
+
+def test_links_default_to_empty(tmp_path: Path) -> None:
+    write(
+        tmp_path,
+        dedent("""\
+        [project]
+        name = "demo"
+    """),
+    )
+    assert load_project_config_from_dir(tmp_path).links == ()
+
+
+def test_parses_links(tmp_path: Path) -> None:
+    write(
+        tmp_path,
+        dedent("""\
+        [project]
+        name = "demo"
+
+        [links.my-skill]
+        source = "skills/my-skill"
+        target = "~/.claude/skills/"
+        description = "Publish the skill"
+
+        [links.rgconf]
+        source = "config/ripgreprc"
+        target = "~/.config/ripgrep/config"
+    """),
+    )
+    config = load_project_config_from_dir(tmp_path)
+    assert [link.name for link in config.links] == ["my-skill", "rgconf"]
+
+    skill = config.link("my-skill")
+    assert skill is not None
+    assert skill.description == "Publish the skill"
+    assert skill.target_is_dir is True
+    # A trailing slash means "link into that directory", so the leaf is the name.
+    assert skill.link_path == Path("~/.claude/skills").expanduser() / "my-skill"
+    assert skill.source_path(tmp_path) == tmp_path / "skills/my-skill"
+
+    rgconf = config.link("rgconf")
+    assert rgconf is not None
+    assert rgconf.target_is_dir is False
+    assert rgconf.link_path == Path("~/.config/ripgrep/config").expanduser()
+
+    assert config.link("nope") is None
+
+
+def test_link_section_must_be_a_table(tmp_path: Path) -> None:
+    write(
+        tmp_path,
+        dedent("""\
+        links = "nope"
+
+        [project]
+        name = "demo"
+    """),
+    )
+    with pytest.raises(ConfigError, match=r"\[links\] must be a table"):
+        load_project_config_from_dir(tmp_path)
+
+
+def test_link_body_must_be_a_table(tmp_path: Path) -> None:
+    write(
+        tmp_path,
+        dedent("""\
+        [project]
+        name = "demo"
+
+        [links]
+        skill = "nope"
+    """),
+    )
+    with pytest.raises(ConfigError, match=r"\[links.skill\] must be a table"):
+        load_project_config_from_dir(tmp_path)
+
+
+@pytest.mark.parametrize(
+    ("body", "match"),
+    [
+        ('target = "~/x"', "source is required"),
+        ('source = ""\ntarget = "~/x"', "source is required"),
+        ('source = "/abs/path"\ntarget = "~/x"', "must be a path relative"),
+        ('source = "~/in-home"\ntarget = "~/x"', "must be a path relative"),
+        ('source = "../escape"\ntarget = "~/x"', "must not contain"),
+        ('source = "a/../../escape"\ntarget = "~/x"', "must not contain"),
+        ('source = "skills/s"', "target is required"),
+        ('source = "skills/s"\ntarget = ""', "target is required"),
+        ('source = "skills/s"\ntarget = "relative/path"', "must be an absolute path"),
+        ('source = "skills/s"\ntarget = "~/x"\ndescription = 3', "description must be a string"),
+    ],
+)
+def test_link_validation_errors(tmp_path: Path, body: str, match: str) -> None:
+    write(
+        tmp_path,
+        dedent("""\
+        [project]
+        name = "demo"
+
+        [links.skill]
+        """)
+        + body
+        + "\n",
+    )
+    with pytest.raises(ConfigError, match=match):
+        load_project_config_from_dir(tmp_path)
+
+
+@pytest.mark.parametrize("name", ["..", ".", "has/slash", "has space"])
+def test_invalid_link_names(tmp_path: Path, name: str) -> None:
+    write(
+        tmp_path,
+        dedent(f"""\
+        [project]
+        name = "demo"
+
+        [links."{name}"]
+        source = "skills/s"
+        target = "~/x"
+    """),
+    )
+    with pytest.raises(ConfigError, match="invalid link name"):
+        load_project_config_from_dir(tmp_path)
+
+
+@pytest.mark.parametrize("name", [".zshrc", "1password", "my-skill", "a.b_c"])
+def test_link_names_allow_filename_shapes(tmp_path: Path, name: str) -> None:
+    write(
+        tmp_path,
+        dedent(f"""\
+        [project]
+        name = "demo"
+
+        [links."{name}"]
+        source = "skills/s"
+        target = "~/"
+    """),
+    )
+    config = load_project_config_from_dir(tmp_path)
+    assert config.links[0].name == name
+
+
+def test_two_links_cannot_resolve_to_the_same_path(tmp_path: Path) -> None:
+    write(
+        tmp_path,
+        dedent("""\
+        [project]
+        name = "demo"
+
+        [links.skill]
+        source = "a"
+        target = "~/.claude/skills/"
+
+        [links.other]
+        source = "b"
+        target = "~/.claude/skills/skill"
+    """),
+    )
+    with pytest.raises(ConfigError, match="both resolve to"):
+        load_project_config_from_dir(tmp_path)

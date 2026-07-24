@@ -11,9 +11,22 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+# Format version of ~/.config/spg/registry.toml. Bumped only for changes this
+# version of spg could not read correctly; purely additive keys don't bump it.
+# Files written before versioning (no `version` key) are treated as version 1.
+REGISTRY_VERSION = 1
+
 
 class RegistryError(Exception):
     """Raised on registry I/O or consistency errors."""
+
+
+@dataclass(frozen=True)
+class RegistryLink:
+    """A symlink spg created for a project. `path` is the link itself."""
+
+    name: str
+    path: Path
 
 
 @dataclass
@@ -22,13 +35,23 @@ class RegistryEntry:
     root: Path
     commands: tuple[str, ...]
     installed_at: str
+    links: tuple[RegistryLink, ...] = ()
 
     def to_table(self) -> dict[str, Any]:
-        return {
+        table: dict[str, Any] = {
             "root": str(self.root),
             "commands": list(self.commands),
             "installed_at": self.installed_at,
         }
+        if self.links:
+            table["links"] = [{"name": link.name, "path": str(link.path)} for link in self.links]
+        return table
+
+    def link(self, path: Path) -> RegistryLink | None:
+        for link in self.links:
+            if link.path == path:
+                return link
+        return None
 
 
 @dataclass
@@ -42,6 +65,15 @@ class Registry:
             return cls(path=path)
         with path.open("rb") as f:
             raw = tomllib.load(f)
+
+        version = raw.get("version", REGISTRY_VERSION)
+        if not isinstance(version, int):
+            raise RegistryError(f"{path}: version must be an integer")
+        if version > REGISTRY_VERSION:
+            raise RegistryError(
+                f"{path}: registry format version {version} is newer than this spg understands "
+                f"(version {REGISTRY_VERSION}); upgrade spg."
+            )
 
         projects_raw = raw.get("projects", {})
         if not isinstance(projects_raw, dict):
@@ -65,6 +97,7 @@ class Registry:
                 root=Path(root),
                 commands=tuple(commands),
                 installed_at=installed_at,
+                links=_parse_links(path, name, body.get("links", [])),
             )
         return cls(path=path, projects=projects)
 
@@ -97,12 +130,19 @@ class Registry:
         finally:
             os.close(fd)
 
-    def upsert(self, name: str, root: Path, commands: tuple[str, ...]) -> RegistryEntry:
+    def upsert(
+        self,
+        name: str,
+        root: Path,
+        commands: tuple[str, ...],
+        links: tuple[RegistryLink, ...] = (),
+    ) -> RegistryEntry:
         entry = RegistryEntry(
             name=name,
             root=root.resolve(),
             commands=commands,
             installed_at=datetime.now(UTC).isoformat(timespec="seconds"),
+            links=links,
         )
         self.projects[name] = entry
         return entry
@@ -123,18 +163,51 @@ class Registry:
                 return entry
         return None
 
+    def find_owner_of_link(self, link_path: Path) -> RegistryEntry | None:
+        for entry in self.projects.values():
+            if entry.link(link_path) is not None:
+                return entry
+        return None
+
     def __iter__(self) -> Iterator[RegistryEntry]:
         return iter(self.projects.values())
 
 
+def _parse_links(path: Path, name: str, raw: Any) -> tuple[RegistryLink, ...]:
+    if not isinstance(raw, list):
+        raise RegistryError(f"{path}: projects.{name}.links must be a list of tables")
+    links: list[RegistryLink] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            raise RegistryError(f"{path}: projects.{name}.links entries must be tables")
+        link_name = item.get("name")
+        link_path = item.get("path")
+        if not isinstance(link_name, str) or not isinstance(link_path, str):
+            raise RegistryError(
+                f"{path}: projects.{name}.links entries need string 'name' and 'path'"
+            )
+        links.append(RegistryLink(name=link_name, path=Path(link_path)))
+    return tuple(links)
+
+
 def _format_registry(projects: dict[str, RegistryEntry]) -> str:
-    lines: list[str] = ["# spg registry — managed file, edit with care\n"]
+    lines: list[str] = [
+        "# spg registry — managed file, edit with care\n",
+        f"version = {REGISTRY_VERSION}\n",
+        "\n",
+    ]
     for name in sorted(projects):
         entry = projects[name]
         lines.append(f"[projects.{_toml_key(name)}]\n")
         lines.append(f"root = {_toml_str(str(entry.root))}\n")
         commands_inner = ", ".join(_toml_str(c) for c in entry.commands)
         lines.append(f"commands = [{commands_inner}]\n")
+        if entry.links:
+            links_inner = ", ".join(
+                f"{{ name = {_toml_str(link.name)}, path = {_toml_str(str(link.path))} }}"
+                for link in entry.links
+            )
+            lines.append(f"links = [{links_inner}]\n")
         lines.append(f"installed_at = {_toml_str(entry.installed_at)}\n")
         lines.append("\n")
     return "".join(lines)

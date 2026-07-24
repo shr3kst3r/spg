@@ -29,6 +29,7 @@ from spg.installer import (
     InstallError,
     InstallResult,
     install_project,
+    link_state,
     list_managed_wrappers,
     prune_orphan_wrappers,
     sync_project,
@@ -40,7 +41,7 @@ from spg.paths import (
     find_project_config,
     registry_path,
 )
-from spg.registry import Registry
+from spg.registry import Registry, RegistryEntry
 
 STARTER_TEMPLATE = """\
 # spg.toml — describes commands this project exposes to ~/bin via spg.
@@ -63,6 +64,16 @@ name = "__SPG_NAME__"
 # [commands.gocd]
 # description = "cd into a project subdirectory"
 # shell_function = 'cd "$(./scripts/resolve.sh "$@")"'
+
+# Each [links.<name>] block symlinks a path in this repo to somewhere on your
+# machine. `source` is relative to the repo root. A `target` ending in '/' means
+# "link into that directory" (the leaf name is <name>); otherwise `target` is
+# the exact path of the symlink.
+#
+# [links.my-skill]
+# source = "skills/my-skill"
+# target = "~/.claude/skills/"
+# description = "Publish this repo's skill to Claude Code"
 """
 
 click.rich_click.TEXT_MARKUP = "ansi"
@@ -82,6 +93,30 @@ CONTEXT_SETTINGS = {"help_option_names": ["-h", "--help"]}
 # when output is not a terminal (e.g. piped or captured under pytest).
 console = Console()
 err_console = Console(stderr=True)
+
+
+def _print_error(message: str) -> None:
+    """Print ``spg: <message>`` to stderr with `message` as literal text.
+
+    Error text routinely contains TOML table names like ``[links.foo]``, which
+    rich would otherwise parse as console markup and swallow, so the message is
+    appended to a `Text` rather than interpolated into a markup string. It is
+    printed with soft wrapping so long absolute paths stay on one line and
+    remain copy-pasteable.
+    """
+    _print_labeled(err_console, "spg: ", "red", message)
+
+
+def _print_warning(message: str) -> None:
+    """Print ``warn: <message>`` to stderr with `message` as literal text."""
+    _print_labeled(err_console, "warn: ", "yellow", message)
+
+
+def _print_labeled(target: Console, label: str, style: str, message: str) -> None:
+    line = Text()
+    line.append(label, style=style)
+    line.append(message)
+    target.print(line, soft_wrap=True)
 
 
 def _short_path(path: Path | str) -> str:
@@ -120,11 +155,11 @@ def init(name_: str | None, directory: str) -> int:
     """Create a starter spg.toml in the current directory."""
     target_dir = Path(directory).resolve()
     if not target_dir.is_dir():
-        err_console.print(f"[red]spg:[/] {target_dir} is not a directory")
+        _print_error(f"{target_dir} is not a directory")
         return 1
     target = target_dir / PROJECT_CONFIG_FILENAME
     if target.exists():
-        err_console.print(f"[red]spg:[/] {target} already exists")
+        _print_error(f"{target} already exists")
         return 1
     project_name = name_ or target_dir.name
     target.write_text(STARTER_TEMPLATE.replace("__SPG_NAME__", project_name))
@@ -168,9 +203,14 @@ def uninstall(name: str | None, directory: str) -> int:
     console.print(f"[bold green]✓[/] Uninstalled [bold cyan]{result.project}[/].")
     if result.removed:
         _print_change_line("-", "red", "removed", result.removed)
+    if result.links_removed:
+        _print_change_line("-", "red", "unlinked", result.links_removed)
     if result.skipped:
         _print_change_line("!", "yellow", "skipped", result.skipped)
         console.print("  [dim](skipped entries are not spg-managed)[/]")
+    if result.links_skipped:
+        _print_change_line("!", "yellow", "kept links", result.links_skipped)
+        console.print("  [dim](kept links are no longer symlinks; left untouched)[/]")
     return 0
 
 
@@ -186,21 +226,21 @@ def sync() -> int:
     for entry in list(registry):
         config_file = entry.root / PROJECT_CONFIG_FILENAME
         if not config_file.is_file():
-            err_console.print(f"[yellow]warn:[/] {entry.name}: {config_file} is missing; skipping")
+            _print_warning(f"{entry.name}: {config_file} is missing; skipping")
             any_failures = True
             failed_projects.add(entry.name)
             continue
         try:
             config = load_project_config(config_file)
         except ConfigError as exc:
-            err_console.print(f"[yellow]warn:[/] {entry.name}: {exc}")
+            _print_warning(f"{entry.name}: {exc}")
             any_failures = True
             failed_projects.add(entry.name)
             continue
         try:
             result = sync_project(config, registry, bin_dir())
         except InstallError as exc:
-            err_console.print(f"[yellow]warn:[/] {entry.name}: {exc}")
+            _print_warning(f"{entry.name}: {exc}")
             any_failures = True
             failed_projects.add(entry.name)
             continue
@@ -222,10 +262,13 @@ def list_projects() -> int:
 
     entries = sorted(registry, key=lambda e: e.name)
     total_commands = sum(len(e.commands) for e in entries)
+    total_links = sum(len(e.links) for e in entries)
 
     table = Table(box=box.SIMPLE_HEAD, header_style="bold", expand=False, pad_edge=False)
     table.add_column("Project", style="bold cyan", no_wrap=True)
     table.add_column("Commands", style="green")
+    if total_links:
+        table.add_column("Links", style="magenta")
     table.add_column("Root", style="dim", overflow="fold")
     for entry in entries:
         commands = (
@@ -233,12 +276,23 @@ def list_projects() -> int:
             if entry.commands
             else Text("(none)", style="dim italic")
         )
-        table.add_row(entry.name, commands, _short_path(entry.root))
+        row: list[RenderableType] = [entry.name, commands]
+        if total_links:
+            row.append(
+                Text("  ").join(Text(link.name, style="magenta") for link in entry.links)
+                if entry.links
+                else Text("(none)", style="dim italic")
+            )
+        row.append(_short_path(entry.root))
+        table.add_row(*row)
 
     console.print(table)
     project_word = "project" if len(entries) == 1 else "projects"
     command_word = "command" if total_commands == 1 else "commands"
-    console.print(f"[dim]{len(entries)} {project_word}, {total_commands} {command_word}.[/]")
+    tally = f"{len(entries)} {project_word}, {total_commands} {command_word}"
+    if total_links:
+        tally += f", {total_links} {'link' if total_links == 1 else 'links'}"
+    console.print(f"[dim]{tally}.[/]")
     return 0
 
 
@@ -253,7 +307,7 @@ def help_(name: str) -> int:
         return 1
     config_file = owner.root / PROJECT_CONFIG_FILENAME
     if not config_file.is_file():
-        err_console.print(f"[red]spg:[/] {owner.name}: {config_file} is missing")
+        _print_error(f"{owner.name}: {config_file} is missing")
         return 1
     config = load_project_config(config_file)
     cmd = config.command(name)
@@ -334,6 +388,9 @@ def status() -> int:
     summary.add_row("Bin dir", _short_path(bd))
     summary.add_row("Projects registered", str(len(registered)))
     summary.add_row("Managed wrappers", str(len(wrappers)))
+    total_links = sum(len(e.links) for e in registered.values())
+    if total_links:
+        summary.add_row("Managed links", str(total_links))
     console.print(summary)
 
     by_project: dict[str, list[str]] = {}
@@ -359,6 +416,8 @@ def status() -> int:
             wrapper_path = bd / cmd
             if not wrapper_path.exists():
                 problems.append(f"missing wrapper: {wrapper_path} (owned by {name})")
+
+        problems.extend(_link_problems(name, entry, project_config))
 
     for project, found in by_project.items():
         if project not in registered:
@@ -475,7 +534,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         result = cli.main(args=args, prog_name="spg", standalone_mode=False)
     except (ConfigError, InstallError) as exc:
-        err_console.print(f"[red]spg:[/] {exc}")
+        _print_error(str(exc))
         return 1
     except _click.exceptions.UsageError as exc:
         exc.show()
@@ -510,6 +569,55 @@ def _resolve_config(start: Path) -> ProjectConfig:
     return load_project_config_from_dir(start.parent)
 
 
+def _link_problems(
+    project: str,
+    entry: RegistryEntry,
+    project_config: ProjectConfig | None,
+) -> list[str]:
+    """Report drift between a project's declared links and the filesystem."""
+    problems: list[str] = []
+    registered_paths = {link.path for link in entry.links}
+
+    if project_config is None:
+        # Can't read spg.toml, so we don't know the intended sources — only
+        # check that what we recorded still looks like a link.
+        for link in entry.links:
+            if not link.path.is_symlink():
+                verb = "is missing" if not link.path.exists() else "is no longer a symlink"
+                problems.append(f"link {link.name!r} {verb}: {link.path} (owned by {project})")
+        return problems
+
+    for link in project_config.links:
+        link_path = link.link_path
+        state = link_state(link, project_config.root)
+        if state == "missing":
+            problems.append(f"missing link: {link_path} (owned by {project})")
+        elif state == "foreign":
+            problems.append(
+                f"link {link_path} points at {link_path.readlink()}, expected "
+                f"{link.source_path(project_config.root)} (owned by {project})"
+            )
+        elif state in ("file", "dir", "other"):
+            problems.append(
+                f"link path {link_path} is not a symlink (owned by {project}); "
+                "spg will not replace it"
+            )
+        if link_path not in registered_paths:
+            problems.append(
+                f"link {link.name!r} is declared in {project}'s spg.toml but not registered "
+                "(run `spg sync`)"
+            )
+
+    declared_paths = {link.link_path for link in project_config.links}
+    for link in entry.links:
+        if link.path not in declared_paths:
+            problems.append(
+                f"stale link {link.name!r} ({link.path}) is no longer declared in {project}'s "
+                "spg.toml (run `spg sync` to remove it)"
+            )
+    return problems
+
+
 def _print_change_line(symbol: str, style: str, label: str, names: list[str]) -> None:
     line = Text()
     line.append("  ")
@@ -527,7 +635,20 @@ def _print_install_result(result: InstallResult, verb: str = "Installed") -> Non
         _print_change_line("~", "yellow", "refreshed", result.refreshed)
     if result.removed:
         _print_change_line("-", "red", "removed", result.removed)
-    if not (result.written or result.refreshed or result.removed):
+    if result.links_written:
+        _print_change_line("+", "green", "linked", result.links_written)
+    if result.links_relinked:
+        _print_change_line("~", "yellow", "relinked", result.links_relinked)
+    if result.links_removed:
+        _print_change_line("-", "red", "unlinked", result.links_removed)
+    if not (
+        result.written
+        or result.refreshed
+        or result.removed
+        or result.links_written
+        or result.links_relinked
+        or result.links_removed
+    ):
         console.print("  [dim]no changes.[/]")
 
 

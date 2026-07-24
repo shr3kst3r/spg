@@ -10,6 +10,9 @@ from spg.paths import PROJECT_CONFIG_FILENAME
 
 _COMMAND_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]*$")
 _PROJECT_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]*$")
+# Link names double as filenames when `target` names a directory, so leading
+# dots and digits are allowed (`.zshrc`, `1password`) — but never '.' or '..'.
+_LINK_NAME_RE = re.compile(r"^[A-Za-z0-9_.][A-Za-z0-9_.-]*$")
 
 
 class ConfigError(Exception):
@@ -50,15 +53,50 @@ class Command:
 
 
 @dataclass(frozen=True)
+class Link:
+    """A symlink this project publishes outside the repo.
+
+    `source` is a path relative to the project root; `target` is where the
+    symlink is created. A `target` ending in '/' names a *directory* to link
+    into, and the link's leaf name is `name`; otherwise `target` is the exact
+    path of the symlink.
+    """
+
+    name: str
+    source: str
+    target: str
+    description: str = ""
+
+    @property
+    def target_is_dir(self) -> bool:
+        return self.target.endswith("/")
+
+    @property
+    def link_path(self) -> Path:
+        expanded = Path(self.target).expanduser()
+        return expanded / self.name if self.target_is_dir else expanded
+
+    def source_path(self, root: Path) -> Path:
+        return root / self.source
+
+
+@dataclass(frozen=True)
 class ProjectConfig:
     name: str
     root: Path
     commands: tuple[Command, ...] = field(default_factory=tuple)
+    links: tuple[Link, ...] = field(default_factory=tuple)
 
     def command(self, name: str) -> Command | None:
         for cmd in self.commands:
             if cmd.name == name:
                 return cmd
+        return None
+
+    def link(self, name: str) -> Link | None:
+        for link in self.links:
+            if link.name == name:
+                return link
         return None
 
 
@@ -92,10 +130,29 @@ def load_project_config(config_path: Path) -> ProjectConfig:
     for cmd_name, body in commands_section.items():
         commands.append(_parse_command(config_path, cmd_name, body))
 
+    links_section = raw.get("links", {})
+    if not isinstance(links_section, dict):
+        raise ConfigError(f"{config_path}: [links] must be a table")
+
+    links: list[Link] = []
+    for link_name, body in links_section.items():
+        links.append(_parse_link(config_path, link_name, body))
+
+    claimed: dict[Path, str] = {}
+    for link in links:
+        owner = claimed.get(link.link_path)
+        if owner is not None:
+            raise ConfigError(
+                f"{config_path}: [links.{link.name}] and [links.{owner}] both resolve to "
+                f"{link.link_path}"
+            )
+        claimed[link.link_path] = link.name
+
     return ProjectConfig(
         name=name,
         root=config_path.parent.resolve(),
         commands=tuple(commands),
+        links=tuple(links),
     )
 
 
@@ -194,6 +251,51 @@ def _parse_command(config_path: Path, cmd_name: str, body: Any) -> Command:
         complete_hook=complete_hook.strip(),
         shell_function=shell_function.strip(),
     )
+
+
+def _parse_link(config_path: Path, link_name: str, body: Any) -> Link:
+    if link_name in (".", "..") or not _LINK_NAME_RE.match(link_name):
+        raise ConfigError(
+            f"{config_path}: invalid link name {link_name!r} "
+            "(must contain only letters, digits, '_', '-', '.' and cannot be '.' or '..')"
+        )
+    if not isinstance(body, dict):
+        raise ConfigError(f"{config_path}: [links.{link_name}] must be a table")
+
+    source = body.get("source")
+    if not isinstance(source, str) or not source.strip():
+        raise ConfigError(
+            f"{config_path}: [links.{link_name}].source is required and must be a non-empty string"
+        )
+    source = source.strip()
+    if source.startswith("~") or Path(source).is_absolute():
+        raise ConfigError(
+            f"{config_path}: [links.{link_name}].source {source!r} must be a path relative "
+            "to the project root"
+        )
+    if ".." in Path(source).parts:
+        raise ConfigError(
+            f"{config_path}: [links.{link_name}].source {source!r} must not contain '..' "
+            "(a link source has to live inside the project)"
+        )
+
+    target = body.get("target")
+    if not isinstance(target, str) or not target.strip():
+        raise ConfigError(
+            f"{config_path}: [links.{link_name}].target is required and must be a non-empty string"
+        )
+    target = target.strip()
+    if not Path(target).expanduser().is_absolute():
+        raise ConfigError(
+            f"{config_path}: [links.{link_name}].target {target!r} must be an absolute path "
+            "(it may start with '~'). End it with '/' to link into a directory."
+        )
+
+    description = body.get("description", "")
+    if not isinstance(description, str):
+        raise ConfigError(f"{config_path}: [links.{link_name}].description must be a string")
+
+    return Link(name=link_name, source=source, target=target, description=description)
 
 
 def load_project_config_from_dir(directory: Path) -> ProjectConfig:

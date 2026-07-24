@@ -7,7 +7,9 @@ Guidance for AI coding agents (and humans) working in this repository.
 `spg` is a tiny per-project command publisher. It reads a project's `spg.toml`
 and exposes each declared command on the user's machine — as a `~/bin/<cmd>`
 wrapper script, or as a shell function defined in their interactive shell —
-with zsh tab completion generated from the same declarations. See
+with zsh tab completion generated from the same declarations. It also
+materializes declared `[links.<name>]` symlinks, for repo content a tool
+expects at a fixed path (e.g. a skill in `~/.claude/skills/`). See
 [README.md](README.md) for the user-facing overview and
 [`prompts/add-spg-support.md`](prompts/add-spg-support.md) for the authoritative
 `spg.toml` schema.
@@ -47,9 +49,9 @@ it that way (no upward imports):
 | Module | Responsibility |
 | --- | --- |
 | `paths.py` | Filesystem locations: `~/bin`, registry path (`XDG_CONFIG_HOME`), `spg.toml` discovery by walking up from CWD. No dependencies. |
-| `config.py` | Parse & validate `spg.toml` into frozen `ProjectConfig` / `Command` / `CommandArg` dataclasses. Raises `ConfigError`. All validation lives here. |
-| `registry.py` | Read/write `~/.config/spg/registry.toml`. Atomic writes + an exclusive `flock` transaction (`Registry.locked()`). Hand-rolled TOML serialization. |
-| `installer.py` | Materialize/remove `~/bin` wrappers, detect conflicts, keep the registry in sync. Wrappers carry a `# spg-managed:<project>:<command>` marker. Raises `InstallError`. |
+| `config.py` | Parse & validate `spg.toml` into frozen `ProjectConfig` / `Command` / `CommandArg` / `Link` dataclasses. Raises `ConfigError`. All validation lives here. |
+| `registry.py` | Read/write `~/.config/spg/registry.toml` (commands + published links, stamped with `REGISTRY_VERSION`). Atomic writes + an exclusive `flock` transaction (`Registry.locked()`). Hand-rolled TOML serialization. |
+| `installer.py` | Materialize/remove `~/bin` wrappers and `[links]` symlinks, detect conflicts, keep the registry in sync. Wrappers carry a `# spg-managed:<project>:<command>` marker. Raises `InstallError`. |
 | `completion.py` | Generate zsh completion + compute completion candidates for `spg __complete`. Runs per-command `complete_hook`s (2s timeout). |
 | `cli.py` | rich-click command group wiring the above together. Thin — logic belongs in the modules above. |
 
@@ -68,10 +70,19 @@ Data flow: `cli` → `config`/`registry`/`installer`/`completion` → `paths`.
   writing — a `~/bin/<cmd>` may be a symlink). Registry mutations happen inside
   `Registry.locked()`. Don't regress this.
 - **Never clobber files spg doesn't own.** Conflict detection in
-  `installer._check_conflicts` is deliberate; `--force` only overrides a
-  non-spg regular file, never another project's command.
+  `installer._check_conflicts` / `_link_conflicts` is deliberate; `--force`
+  only overrides a non-spg regular file or a foreign symlink, never another
+  project's command or link. A real directory in a link's way is refused even
+  with `--force`, and removal only ever unlinks a recorded path that is *still
+  a symlink* — spg must not be able to delete a user's data.
+- **Link identity is the link path**, recorded in the registry (with its
+  declaration name for reporting). There's no in-file marker to read back, so
+  ownership comes from the registry plus the symlink's current value.
 - **CLI commands return an int exit code** and print errors to stderr with an
-  `spg: ` prefix. `main()` maps `ConfigError`/`InstallError` to exit 1.
+  `spg: ` prefix. `main()` maps `ConfigError`/`InstallError` to exit 1. Route
+  dynamic error text through `_print_error`/`_print_warning`, not an f-string
+  into `err_console.print` — messages contain `[commands.x]`/`[links.x]` table
+  names that rich would parse as markup and silently swallow.
 - Type hints everywhere; `ty check` must stay green.
 
 ## Testing
