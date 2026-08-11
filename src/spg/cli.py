@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from difflib import get_close_matches
 from pathlib import Path
 
 import click as _click
@@ -214,12 +215,12 @@ def uninstall(name: str | None, directory: str) -> int:
     return 0
 
 
-@cli.command()
+@cli.command(short_help="Refresh wrappers and links from every registered spg.toml.")
 def sync() -> int:
-    """Refresh ~/bin wrappers from every registered spg.toml and prune orphans."""
+    """Refresh ~/bin wrappers and links from every registered spg.toml, and prune orphans."""
     registry = Registry.load(registry_path())
     if not registry.projects:
-        console.print("[dim]No projects registered.[/]")
+        console.print("[dim]No projects registered.[/] Run [bold cyan]spg install[/] in a project.")
         return 0
     any_failures = False
     failed_projects: set[str] = set()
@@ -296,14 +297,25 @@ def list_projects() -> int:
     return 0
 
 
-@cli.command(name="help")
-@click.argument("name")
-def help_(name: str) -> int:
-    """Show usage for a command exposed via spg."""
+@cli.command(name="help", short_help="List commands exposed via spg, or show usage for one.")
+@click.argument("name", required=False)
+def help_(name: str | None) -> int:
+    """List the commands exposed via spg, or show usage for one of them.
+
+    With no NAME, prints every registered command grouped by the project that
+    owns it. With a NAME, prints that command's declared description, arguments,
+    and what it runs.
+    """
     registry = Registry.load(registry_path())
+    if name is None:
+        return _print_help_overview(registry)
     owner = registry.find_owner_of_command(name)
     if owner is None:
-        err_console.print(f"[red]spg:[/] no registered command named [bold]{name}[/]")
+        _print_error(f"no registered command named {name!r}")
+        suggestions = get_close_matches(name, list_managed_commands(registry), n=3, cutoff=0.7)
+        if suggestions:
+            _print_labeled(err_console, "did you mean: ", "yellow", ", ".join(suggestions))
+        err_console.print("Run [bold cyan]spg help[/] to list available commands.")
         return 1
     config_file = owner.root / PROJECT_CONFIG_FILENAME
     if not config_file.is_file():
@@ -312,10 +324,8 @@ def help_(name: str) -> int:
     config = load_project_config(config_file)
     cmd = config.command(name)
     if cmd is None:
-        err_console.print(
-            f"[red]spg:[/] registry says [bold]{owner.name}[/] owns [bold]{name}[/], but it's "
-            f"no longer in {config_file}. Run [bold cyan]spg sync[/]."
-        )
+        _print_error(f"registry says {owner.name} owns {name}, but it's no longer in {config_file}")
+        err_console.print("Run [bold cyan]spg sync[/] to refresh the registry.")
         return 1
 
     body: list[RenderableType] = []
@@ -457,7 +467,11 @@ def status() -> int:
     return 0
 
 
-@cli.group(invoke_without_command=True, context_settings=CONTEXT_SETTINGS)
+@cli.group(
+    invoke_without_command=True,
+    context_settings=CONTEXT_SETTINGS,
+    short_help="Print a shell completion script.",
+)
 @click.pass_context
 def completion(ctx: click.Context) -> int:
     """Print a shell completion script (e.g. `spg completion zsh`)."""
@@ -567,6 +581,75 @@ def _resolve_config(start: Path) -> ProjectConfig:
             raise ConfigError(f"no {PROJECT_CONFIG_FILENAME} found at or above {start}")
         return load_project_config(config_file)
     return load_project_config_from_dir(start.parent)
+
+
+def _print_help_overview(registry: Registry) -> int:
+    """List every registered command, grouped by the project that owns it."""
+    entries = sorted(registry, key=lambda e: e.name)
+    if not entries:
+        console.print("[dim]No projects registered.[/] Run [bold cyan]spg install[/] in a project.")
+        return 0
+    if not any(entry.commands for entry in entries):
+        console.print(
+            "[dim]No commands registered.[/] Declare one in a project's "
+            f"[bold]{PROJECT_CONFIG_FILENAME}[/] and run [bold cyan]spg install[/]."
+        )
+        return 0
+
+    table = Table(box=box.SIMPLE_HEAD, header_style="bold", expand=False, pad_edge=False)
+    table.add_column("Project", style="bold cyan", no_wrap=True)
+    table.add_column("Command", style="green", no_wrap=True)
+    table.add_column("Description", overflow="fold")
+    first_group = True
+    for entry in entries:
+        if not entry.commands:
+            continue
+        if not first_group:
+            table.add_section()
+        first_group = False
+        summaries = _command_summaries(entry)
+        for i, cmd_name in enumerate(sorted(entry.commands)):
+            table.add_row(entry.name if i == 0 else "", cmd_name, summaries[cmd_name])
+
+    console.print(table)
+    console.print("[dim]Run[/] [bold cyan]spg help <command>[/] [dim]for a command's details.[/]")
+    return 0
+
+
+def _command_summaries(entry: RegistryEntry) -> dict[str, Text]:
+    """One-line description per registered command name, read from the project's spg.toml.
+
+    Falls back to a dim note when the config can't be read or no longer declares
+    a command the registry still records — `spg help` is a discovery entry point,
+    so it reports the drift instead of failing on it.
+    """
+    config_file = entry.root / PROJECT_CONFIG_FILENAME
+    try:
+        config: ProjectConfig | None = load_project_config(config_file)
+    except (ConfigError, OSError):
+        config = None
+
+    summaries: dict[str, Text] = {}
+    for cmd_name in entry.commands:
+        if config is None:
+            summaries[cmd_name] = Text(
+                f"({PROJECT_CONFIG_FILENAME} is missing or unreadable)", style="dim italic"
+            )
+            continue
+        cmd = config.command(cmd_name)
+        if cmd is None:
+            summaries[cmd_name] = Text(
+                f"(no longer in {PROJECT_CONFIG_FILENAME} — run `spg sync`)", style="dim italic"
+            )
+            continue
+        if cmd.description:
+            summary = Text(cmd.description)
+        else:
+            summary = Text("(no description)", style="dim italic")
+        if cmd.is_shell_function:
+            summary.append("  shell function", style="dim")
+        summaries[cmd_name] = summary
+    return summaries
 
 
 def _link_problems(

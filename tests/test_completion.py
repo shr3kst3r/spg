@@ -9,6 +9,7 @@ from spg import cli, paths
 from spg.completion import (
     SENTINEL_DIRS,
     SENTINEL_FILES,
+    SPG_SUBCOMMANDS,
     candidates_for_command,
     candidates_for_spg,
     list_managed_commands,
@@ -39,6 +40,20 @@ def test_candidates_for_spg_first_level(isolated_env: dict[str, Path]) -> None:
     names = [c.split(":", 1)[0] for c in cands]
     assert "install" in names
     assert "completion" in names
+
+
+def test_spg_subcommands_match_the_cli() -> None:
+    """SPG_SUBCOMMANDS is a hand-maintained mirror of the CLI — keep it honest.
+
+    `completion` sits below `cli` in the dependency chain and can't import it, so
+    this test is what stops the completion table's names and descriptions from
+    drifting away from the commands the CLI actually exposes.
+    """
+    visible = {name: cmd for name, cmd in cli.cli.commands.items() if not cmd.hidden}
+    assert {name for name, _ in SPG_SUBCOMMANDS} == set(visible)
+    for name, description in SPG_SUBCOMMANDS:
+        expected = visible[name].get_short_help_str(limit=200).rstrip(".")
+        assert description == expected, f"{name}: completion says {description!r}, CLI {expected!r}"
 
 
 def test_candidates_for_spg_help_lists_managed_commands(

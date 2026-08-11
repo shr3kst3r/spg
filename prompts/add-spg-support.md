@@ -44,8 +44,9 @@ project scripts that implement `complete_hook` callbacks.
   (`value:description` accepted) when invoked as:
   `<hook> <position> <words…>`  (position is 1-indexed against args after the
   command name; `words[0]` is the command itself).
-- `spg sync` re-reads every registered project's `spg.toml`; `spg help <cmd>`
-  shows declared usage; `spg status` reports drift.
+- `spg sync` re-reads every registered project's `spg.toml`; `spg help` lists
+  every published command grouped by project and `spg help <cmd>` shows one
+  command's declared usage; `spg status` reports drift.
 
 ---
 
@@ -250,6 +251,7 @@ Run, in order, from the project root:
 ```sh
 spg install      # writes ~/bin/<cmd> wrappers, creates links, registers the project
 spg list         # confirm the project, command list, and links
+spg help         # confirm every command shows up with its description
 spg help <cmd>   # for each declared command — verify description + args
 spg status       # confirm no wrapper/link drift
 <cmd> --help     # if the underlying command supports it — sanity check it actually runs
