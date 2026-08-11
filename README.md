@@ -19,13 +19,19 @@ so `mycmd <TAB>` offers the right arguments without any extra wiring.
 
 ## Install
 
-`spg` is a Python package managed with [uv](https://docs.astral.sh/uv/):
+`spg` is a Python package managed with [uv](https://docs.astral.sh/uv/). It is
+not on PyPI (the `spg` name there belongs to an unrelated project), so install
+it straight from the repository:
 
 ```sh
-uv tool install spg          # install the CLI globally
+uv tool install git+https://github.com/shr3kst3r/spg.git   # install the CLI globally
 # or, from a clone:
+uv tool install .            # install the CLI from your working copy
 uv run spg --help            # run without installing
 ```
+
+To pick up new commits later, re-run the install with `--force`, or
+`uv tool upgrade spg`.
 
 Add completion (zsh) to your `~/.zshrc`:
 
