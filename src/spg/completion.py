@@ -16,13 +16,17 @@ from spg.registry import Registry
 SENTINEL_FILES = "__files__"
 SENTINEL_DIRS = "__directories__"
 
+# Subcommand names and descriptions offered when completing `spg <TAB>`.
+# Duplicated here on purpose: this module sits below `cli` in the dependency
+# chain and must not import it. `tests/test_completion.py` asserts this table
+# matches the CLI's own commands and short help, so the two can't drift.
 SPG_SUBCOMMANDS: tuple[tuple[str, str], ...] = (
     ("init", "Create a starter spg.toml in the current directory"),
     ("install", "Register the current project and write wrappers to ~/bin"),
     ("uninstall", "Remove wrappers and registry entry for a project"),
-    ("sync", "Re-read every registered project's spg.toml"),
+    ("sync", "Refresh wrappers and links from every registered spg.toml"),
     ("list", "Show registered projects and their commands"),
-    ("help", "Show usage for a command exposed via spg"),
+    ("help", "List commands exposed via spg, or show usage for one"),
     ("status", "Diagnose registry / ~/bin mismatches"),
     ("completion", "Print a shell completion script"),
 )

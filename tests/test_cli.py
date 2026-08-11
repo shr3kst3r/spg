@@ -100,6 +100,76 @@ def test_help_unknown_command(isolated_env, capsys: pytest.CaptureFixture[str]) 
     assert rc == 1
     err = capsys.readouterr().err
     assert "no registered command" in err
+    # Dead end → hint: point at the listing instead.
+    assert "spg help" in err
+
+
+def test_help_unknown_command_suggests_close_match(
+    isolated_env, make_project, capsys: pytest.CaptureFixture[str]
+) -> None:
+    project = make_project("demo")
+    cli.main(["install", "-C", str(project)])
+    capsys.readouterr()
+
+    rc = cli.main(["help", "helo"])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "did you mean" in err
+    assert "hello" in err
+
+
+def test_help_without_name_lists_commands(
+    isolated_env, make_project, capsys: pytest.CaptureFixture[str]
+) -> None:
+    project = make_project("demo")
+    other = make_project(
+        "tools",
+        dedent("""\
+            [commands.gocd]
+            description = "cd into the project"
+            shell_function = 'cd "$(pwd)"'
+            """),
+    )
+    cli.main(["install", "-C", str(project)])
+    cli.main(["install", "-C", str(other)])
+    capsys.readouterr()
+
+    rc = cli.main(["help"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    # Every registered command, grouped under its owning project.
+    assert "demo" in out
+    assert "hello" in out
+    assert "Say hello" in out
+    assert "tools" in out
+    assert "gocd" in out
+    assert "cd into the project" in out
+    assert "shell function" in out
+    assert "spg help <command>" in out
+
+
+def test_help_without_name_on_empty_registry(
+    isolated_env, capsys: pytest.CaptureFixture[str]
+) -> None:
+    rc = cli.main(["help"])
+    assert rc == 0
+    assert "No projects registered" in capsys.readouterr().out
+
+
+def test_help_without_name_reports_command_missing_from_config(
+    isolated_env, make_project, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The listing reports registry/spg.toml drift instead of failing on it."""
+    project = make_project("demo")
+    cli.main(["install", "-C", str(project)])
+    (project / "spg.toml").unlink()
+    capsys.readouterr()
+
+    rc = cli.main(["help"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "hello" in out
+    assert "unreadable" in out
 
 
 def test_status_clean(isolated_env, make_project, capsys: pytest.CaptureFixture[str]) -> None:

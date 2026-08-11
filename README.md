@@ -51,7 +51,8 @@ spg init        # write a starter spg.toml
 $EDITOR spg.toml  # declare your commands
 spg install     # write ~/bin/<cmd> wrappers and register the project
 spg list        # confirm what's registered
-spg help <cmd>  # show a command's declared usage
+spg help        # list every published command, grouped by project
+spg help <cmd>  # show one command's declared usage
 ```
 
 ## `spg.toml`
@@ -128,7 +129,7 @@ authoritative schema and an agent-ready guide to adding `spg` to any project.
 | `spg uninstall [name]` | Remove a project's wrappers, links, and registry entry. |
 | `spg sync` | Re-read every registered project's `spg.toml`, refresh wrappers and links, and prune orphaned ones. |
 | `spg list` | Show registered projects with their commands and links. |
-| `spg help <cmd>` | Show a published command's declared usage. |
+| `spg help [cmd]` | List every published command grouped by project, or show one command's declared usage. |
 | `spg status` | Diagnose registry / `~/bin` / link drift. |
 | `spg completion zsh` | Print the zsh completion script. |
 
