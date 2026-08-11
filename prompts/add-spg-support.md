@@ -133,6 +133,14 @@ Rules:
   and `shell_function`), the user needs a fresh shell (or to re-source their
   completion script) for the change to take effect. `spg sync` updates the
   registry but cannot reach into already-running shells.
+- **The end user may decline any individual command or link** (with
+  `spg install --without <sel>`, `spg install -i`, or `spg disable <sel>`), and
+  the choice persists across `spg sync`. So do not assume everything this
+  `spg.toml` declares is present on a given machine: a command that shells out
+  to a sibling spg command should handle that command being absent (or call the
+  underlying script directly, which is always there). There is no schema field
+  for this — a project cannot mark an item optional or pre-decline one on a
+  user's behalf; declining is purely a user-side act.
 
 ---
 

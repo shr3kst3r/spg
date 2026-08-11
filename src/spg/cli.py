@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
+import sys
+from collections.abc import Collection, Sequence
 from difflib import get_close_matches
 from pathlib import Path
 
@@ -23,12 +24,17 @@ from spg.completion import (
 from spg.config import (
     ConfigError,
     ProjectConfig,
+    SelectorKind,
+    display_selector,
     load_project_config,
     load_project_config_from_dir,
+    resolve_selector,
 )
 from spg.installer import (
+    ExclusionChange,
     InstallError,
     InstallResult,
+    entry_excluded_selectors,
     install_project,
     link_state,
     list_managed_wrappers,
@@ -174,12 +180,80 @@ def init(name_: str | None, directory: str) -> int:
 @click.option(
     "--force", is_flag=True, help="Overwrite non-spg-managed files in ~/bin with matching names."
 )
-def install(directory: str, force: bool) -> int:
+@click.option(
+    "--without",
+    "without",
+    multiple=True,
+    metavar="SELECTOR",
+    help="Don't install this command or link (repeatable). "
+    "Use NAME, or cmd:NAME / link:NAME when both are declared.",
+)
+@click.option(
+    "-i",
+    "--interactive",
+    is_flag=True,
+    help="Pick what to install from a checklist (requires a terminal).",
+)
+def install(directory: str, force: bool, without: tuple[str, ...], interactive: bool) -> int:
     """Register the current project and write wrappers to ~/bin."""
+    if without and interactive:
+        raise click.UsageError("--without and --interactive are mutually exclusive")
     config = _resolve_config(Path(directory))
     registry = Registry.load(registry_path())
-    result = install_project(config, registry, bin_dir(), force=force)
+    if interactive:
+        # A pre-lock read of the stored exclusions, used *only* to pre-fill the
+        # checklist. The installer re-reads them inside the registry lock and is
+        # the only thing that decides with them. Keyed by name, the way the
+        # installer keys its own lookup, so the checklist cannot mark an item
+        # "disabled" from an entry the install will not consult.
+        entry = registry.projects.get(config.name)
+        changes = _interactive_select(
+            config,
+            excluded_commands=entry.excluded_commands if entry else (),
+            excluded_links=entry.excluded_links if entry else (),
+        )
+    else:
+        changes = _disable_change(config, without)
+    result = install_project(config, registry, bin_dir(), force=force, changes=changes)
     _print_install_result(result)
+    return 0
+
+
+@cli.command(short_help="Stop installing named commands or links for this project.")
+@click.argument("names", nargs=-1, required=True, metavar="SELECTOR...")
+@click.option("-C", "--dir", "directory", default=".", show_default=True, help="Project directory.")
+def disable(names: tuple[str, ...], directory: str) -> int:
+    """Stop installing the named commands or links for this project.
+
+    Removes their wrappers and links now, and records the choice so
+    `spg install` and `spg sync` keep honoring it. Name an item as NAME, or as
+    cmd:NAME / link:NAME when a command and a link share a name.
+    """
+    return _apply_exclusion_change(directory, names, enable=False)
+
+
+@cli.command(short_help="Install named commands or links for this project again.")
+@click.argument("names", nargs=-1, required=True, metavar="SELECTOR...")
+@click.option("-C", "--dir", "directory", default=".", show_default=True, help="Project directory.")
+def enable(names: tuple[str, ...], directory: str) -> int:
+    """Install the named commands or links for this project again.
+
+    Undoes an earlier `spg disable` (or `spg install --without`) and recreates
+    the wrapper or link immediately.
+    """
+    return _apply_exclusion_change(directory, names, enable=True)
+
+
+def _apply_exclusion_change(directory: str, names: tuple[str, ...], *, enable: bool) -> int:
+    config = _resolve_config(Path(directory))
+    registry = Registry.load(registry_path())
+    changes = (
+        _enable_change(config, names, registry.projects.get(config.name))
+        if enable
+        else _disable_change(config, names)
+    )
+    result = sync_project(config, registry, bin_dir(), changes=changes)
+    _print_install_result(result, verb="Updated")
     return 0
 
 
@@ -264,12 +338,15 @@ def list_projects() -> int:
     entries = sorted(registry, key=lambda e: e.name)
     total_commands = sum(len(e.commands) for e in entries)
     total_links = sum(len(e.links) for e in entries)
+    any_excluded = any(e.has_exclusions for e in entries)
 
     table = Table(box=box.SIMPLE_HEAD, header_style="bold", expand=False, pad_edge=False)
     table.add_column("Project", style="bold cyan", no_wrap=True)
     table.add_column("Commands", style="green")
     if total_links:
         table.add_column("Links", style="magenta")
+    if any_excluded:
+        table.add_column("Disabled", style="dim")
     table.add_column("Root", style="dim", overflow="fold")
     for entry in entries:
         commands = (
@@ -283,6 +360,13 @@ def list_projects() -> int:
                 Text("  ").join(Text(link.name, style="magenta") for link in entry.links)
                 if entry.links
                 else Text("(none)", style="dim italic")
+            )
+        if any_excluded:
+            excluded = entry_excluded_selectors(entry)
+            row.append(
+                Text("  ").join(Text(selector, style="dim") for selector in excluded)
+                if excluded
+                else Text("—", style="dim")
             )
         row.append(_short_path(entry.root))
         table.add_row(*row)
@@ -408,14 +492,26 @@ def status() -> int:
         by_project.setdefault(meta.project, []).append(path.name)
 
     problems: list[str] = []
+    # Declined items the project no longer declares. Informational only: per the
+    # ADR a stale exclusion is kept, never pruned and never a failure.
+    notes: list[str] = []
     shell_fn_commands: dict[str, set[str]] = {}
 
     for name, entry in registered.items():
         config_file = entry.root / PROJECT_CONFIG_FILENAME
         try:
-            project_config = load_project_config(config_file)
+            declared: ProjectConfig | None = load_project_config(config_file)
         except (ConfigError, OSError):
-            project_config = None
+            declared = None
+        # Everything below works from the config minus this user's declined
+        # items: those are *expected* to be absent, so their absence is not drift.
+        project_config = (
+            declared.without(commands=entry.excluded_commands, links=entry.excluded_links)
+            if declared is not None
+            else None
+        )
+        if declared is not None:
+            notes.extend(_stale_exclusion_notes(name, entry, declared))
         if project_config is not None:
             shell_fn_commands[name] = {
                 c.name for c in project_config.commands if c.is_shell_function
@@ -444,6 +540,14 @@ def status() -> int:
                     "(run `spg sync` to prune)"
                 )
 
+    if notes:
+        console.print()
+        for note in notes:
+            line = Text()
+            line.append("note: ", style="dim bold")
+            line.append(note, style="dim")
+            console.print(line, soft_wrap=True)
+
     if problems:
         items = Text()
         for i, p in enumerate(problems):
@@ -465,6 +569,27 @@ def status() -> int:
         return 1
     console.print("\n[bold green]✓[/] All good.")
     return 0
+
+
+def _stale_exclusion_notes(
+    project: str,
+    entry: RegistryEntry,
+    declared: ProjectConfig,
+) -> list[str]:
+    """Declined names `declared` no longer has, reported without failing status."""
+    notes: list[str] = []
+    stale: list[tuple[SelectorKind, str]] = [
+        ("command", n) for n in entry.excluded_commands if declared.command(n) is None
+    ]
+    stale += [("link", n) for n in entry.excluded_links if declared.link(n) is None]
+    for kind, name in stale:
+        selector = display_selector(kind, name)
+        notes.append(
+            f"{project}: disabled {selector} is no longer declared in "
+            f"{PROJECT_CONFIG_FILENAME}; kept in case it comes back "
+            f"(run `spg enable {selector}` to forget it)"
+        )
+    return notes
 
 
 @cli.group(
@@ -583,6 +708,165 @@ def _resolve_config(start: Path) -> ProjectConfig:
     return load_project_config_from_dir(start.parent)
 
 
+def _resolve_selectors(
+    config: ProjectConfig,
+    selectors: Collection[str],
+    *,
+    also_commands: Collection[str] = (),
+    also_links: Collection[str] = (),
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Resolve typed selectors into (command names, link names).
+
+    Raises `ConfigError` on the first bad one — freshly typed selectors are
+    rejected loudly, unlike stored exclusions.
+    """
+    commands: list[str] = []
+    links: list[str] = []
+    for selector in selectors:
+        kind, name = resolve_selector(
+            config, selector, also_commands=also_commands, also_links=also_links
+        )
+        target = commands if kind == "command" else links
+        if name not in target:
+            target.append(name)
+    return tuple(commands), tuple(links)
+
+
+def _disable_change(config: ProjectConfig, selectors: Collection[str]) -> ExclusionChange:
+    commands, links = _resolve_selectors(config, selectors)
+    return ExclusionChange(disable_commands=commands, disable_links=links)
+
+
+def _enable_change(
+    config: ProjectConfig,
+    selectors: Collection[str],
+    entry: RegistryEntry | None,
+) -> ExclusionChange:
+    """Build an enable request, accepting names the project no longer declares.
+
+    A stored exclusion outlives the declaration it names (per the ADR it is kept,
+    not pruned), and `spg status` reports it, so `spg enable` has to be able to
+    name it — otherwise there is no way to clear one at all.
+
+    The pre-lock read of `entry` only widens *what parses*; the effective
+    exclusion set is still computed from the entry the installer reads inside the
+    lock, where enabling a name that is no longer stored is simply a no-op.
+    """
+    commands, links = _resolve_selectors(
+        config,
+        selectors,
+        also_commands=entry.excluded_commands if entry else (),
+        also_links=entry.excluded_links if entry else (),
+    )
+    return ExclusionChange(enable_commands=commands, enable_links=links)
+
+
+def _interactive_select(
+    config: ProjectConfig,
+    *,
+    excluded_commands: Collection[str],
+    excluded_links: Collection[str],
+) -> ExclusionChange:
+    """Ask which declared items to skip, and turn the answer into a change.
+
+    The answer is authoritative rather than additive over the items on the list:
+    anything declared that the user does not skip is (re-)enabled, so re-running
+    `spg install -i` fully describes the desired state. Currently-declined items
+    are marked in the table and listed above the prompt, since an empty answer
+    means "install everything".
+    """
+    if not sys.stdin.isatty():
+        raise click.UsageError("--interactive requires a terminal; stdin is not a TTY")
+
+    items: list[tuple[SelectorKind, str]] = [("command", c.name) for c in config.commands] + [
+        ("link", link.name) for link in config.links
+    ]
+    if not items:
+        console.print(
+            f"[dim]{config.name} declares no commands or links to choose from.[/]",
+        )
+        return ExclusionChange()
+
+    already: set[tuple[SelectorKind, str]] = {("command", n) for n in excluded_commands} | {
+        ("link", n) for n in excluded_links
+    }
+
+    table = Table(box=box.SIMPLE_HEAD, header_style="bold", expand=False, pad_edge=False)
+    table.add_column("#", style="bold", justify="right", no_wrap=True)
+    table.add_column("Item", style="green", no_wrap=True)
+    table.add_column("Description", overflow="fold")
+    table.add_column("", style="dim", no_wrap=True)
+    for number, item in enumerate(items, start=1):
+        kind, name = item
+        if kind == "command":
+            cmd = config.command(name)
+            detail = Text(cmd.description if cmd and cmd.description else "", style="italic")
+            label = Text(name, style="green")
+        else:
+            link = config.link(name)
+            detail = Text(link.description if link and link.description else "", style="italic")
+            if link is not None:
+                if detail.plain:
+                    detail.append("  ")
+                detail.append(f"→ {_short_path(link.link_path)}", style="dim")
+            label = Text(name, style="magenta")
+        table.add_row(str(number), label, detail, "disabled" if item in already else "")
+
+    console.print()
+    console.print(f"[bold]{config.name}[/] declares:")
+    console.print(table)
+    marked = [str(i) for i, item in enumerate(items, start=1) if item in already]
+    if marked:
+        console.print(
+            f"[dim]Currently disabled: {', '.join(marked)} — "
+            "list them again to keep them disabled.[/]"
+        )
+
+    while True:
+        answer = click.prompt(
+            "Numbers to skip (comma-separated, empty = install everything)",
+            default="",
+            show_default=False,
+        )
+        try:
+            skipped = _parse_number_list(answer, len(items))
+        except ValueError as exc:
+            _print_error(str(exc))
+            continue
+        break
+
+    disable = [items[i - 1] for i in skipped]
+    # Authoritative only over what the checklist actually showed. A stored
+    # exclusion for a name this spg.toml no longer declares is not on the list,
+    # so the user cannot have answered about it: per the ADR it is kept, not
+    # pruned. `spg enable <name>` is the explicit way to clear one.
+    shown = set(items)
+    enable = [item for item in already if item in shown and item not in disable]
+    return ExclusionChange(
+        disable_commands=tuple(name for kind, name in disable if kind == "command"),
+        disable_links=tuple(name for kind, name in disable if kind == "link"),
+        enable_commands=tuple(name for kind, name in enable if kind == "command"),
+        enable_links=tuple(name for kind, name in enable if kind == "link"),
+    )
+
+
+def _parse_number_list(answer: str, count: int) -> list[int]:
+    """Parse a comma/space separated list of 1-based item numbers."""
+    numbers: list[int] = []
+    for token in answer.replace(",", " ").split():
+        try:
+            number = int(token)
+        except ValueError:
+            raise ValueError(
+                f"{token!r} is not a number; enter numbers from the list above"
+            ) from None
+        if not 1 <= number <= count:
+            raise ValueError(f"{number} is out of range; pick between 1 and {count}")
+        if number not in numbers:
+            numbers.append(number)
+    return numbers
+
+
 def _print_help_overview(registry: Registry) -> int:
     """List every registered command, grouped by the project that owns it."""
     entries = sorted(registry, key=lambda e: e.name)
@@ -657,7 +941,12 @@ def _link_problems(
     entry: RegistryEntry,
     project_config: ProjectConfig | None,
 ) -> list[str]:
-    """Report drift between a project's declared links and the filesystem."""
+    """Report drift between a project's declared links and the filesystem.
+
+    `project_config` must already have this user's declined links filtered out
+    (see `status`): a declined link is expected to be absent, so reporting it
+    would hold `spg status` at exit 1 forever.
+    """
     problems: list[str] = []
     registered_paths = {link.path for link in entry.links}
 
@@ -724,6 +1013,10 @@ def _print_install_result(result: InstallResult, verb: str = "Installed") -> Non
         _print_change_line("~", "yellow", "relinked", result.links_relinked)
     if result.links_removed:
         _print_change_line("-", "red", "unlinked", result.links_removed)
+    # Report what is declined on every install/sync, so a missing command is
+    # explained rather than mysterious.
+    if result.excluded:
+        _print_change_line("⊘", "dim", "disabled", result.excluded)
     if not (
         result.written
         or result.refreshed
@@ -731,6 +1024,7 @@ def _print_install_result(result: InstallResult, verb: str = "Installed") -> Non
         or result.links_written
         or result.links_relinked
         or result.links_removed
+        or result.excluded
     ):
         console.print("  [dim]no changes.[/]")
 

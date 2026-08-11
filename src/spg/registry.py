@@ -31,11 +31,21 @@ class RegistryLink:
 
 @dataclass
 class RegistryEntry:
+    """What spg installed for one project on this machine, and what it declined.
+
+    `commands` and `links` are what is *actually installed*.
+    `excluded_commands` / `excluded_links` record the declaration names this
+    machine's user declined, which is why those items are absent. They are
+    stored bare (no `cmd:`/`link:` prefix) — the two lists carry the namespace.
+    """
+
     name: str
     root: Path
     commands: tuple[str, ...]
     installed_at: str
     links: tuple[RegistryLink, ...] = ()
+    excluded_commands: tuple[str, ...] = ()
+    excluded_links: tuple[str, ...] = ()
 
     def to_table(self) -> dict[str, Any]:
         table: dict[str, Any] = {
@@ -45,7 +55,15 @@ class RegistryEntry:
         }
         if self.links:
             table["links"] = [{"name": link.name, "path": str(link.path)} for link in self.links]
+        if self.excluded_commands:
+            table["excluded_commands"] = list(self.excluded_commands)
+        if self.excluded_links:
+            table["excluded_links"] = list(self.excluded_links)
         return table
+
+    @property
+    def has_exclusions(self) -> bool:
+        return bool(self.excluded_commands or self.excluded_links)
 
     def link(self, path: Path) -> RegistryLink | None:
         for link in self.links:
@@ -98,6 +116,8 @@ class Registry:
                 commands=tuple(commands),
                 installed_at=installed_at,
                 links=_parse_links(path, name, body.get("links", [])),
+                excluded_commands=_parse_names(path, name, body, "excluded_commands"),
+                excluded_links=_parse_names(path, name, body, "excluded_links"),
             )
         return cls(path=path, projects=projects)
 
@@ -136,6 +156,8 @@ class Registry:
         root: Path,
         commands: tuple[str, ...],
         links: tuple[RegistryLink, ...] = (),
+        excluded_commands: tuple[str, ...] = (),
+        excluded_links: tuple[str, ...] = (),
     ) -> RegistryEntry:
         entry = RegistryEntry(
             name=name,
@@ -143,6 +165,8 @@ class Registry:
             commands=commands,
             installed_at=datetime.now(UTC).isoformat(timespec="seconds"),
             links=links,
+            excluded_commands=excluded_commands,
+            excluded_links=excluded_links,
         )
         self.projects[name] = entry
         return entry
@@ -190,6 +214,13 @@ def _parse_links(path: Path, name: str, raw: Any) -> tuple[RegistryLink, ...]:
     return tuple(links)
 
 
+def _parse_names(path: Path, name: str, body: dict[str, Any], key: str) -> tuple[str, ...]:
+    raw = body.get(key, [])
+    if not isinstance(raw, list) or not all(isinstance(item, str) for item in raw):
+        raise RegistryError(f"{path}: projects.{name}.{key} must be a list of strings")
+    return tuple(raw)
+
+
 def _format_registry(projects: dict[str, RegistryEntry]) -> str:
     lines: list[str] = [
         "# spg registry — managed file, edit with care\n",
@@ -202,12 +233,21 @@ def _format_registry(projects: dict[str, RegistryEntry]) -> str:
         lines.append(f"root = {_toml_str(str(entry.root))}\n")
         commands_inner = ", ".join(_toml_str(c) for c in entry.commands)
         lines.append(f"commands = [{commands_inner}]\n")
+        # Both exclusion keys are additive and only written when non-empty, so a
+        # registry with nothing declined is byte-identical to what spg wrote
+        # before exclusions existed.
+        if entry.excluded_commands:
+            excluded_inner = ", ".join(_toml_str(c) for c in entry.excluded_commands)
+            lines.append(f"excluded_commands = [{excluded_inner}]\n")
         if entry.links:
             links_inner = ", ".join(
                 f"{{ name = {_toml_str(link.name)}, path = {_toml_str(str(link.path))} }}"
                 for link in entry.links
             )
             lines.append(f"links = [{links_inner}]\n")
+        if entry.excluded_links:
+            excluded_inner = ", ".join(_toml_str(link) for link in entry.excluded_links)
+            lines.append(f"excluded_links = [{excluded_inner}]\n")
         lines.append(f"installed_at = {_toml_str(entry.installed_at)}\n")
         lines.append("\n")
     return "".join(lines)

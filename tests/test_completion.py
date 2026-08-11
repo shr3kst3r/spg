@@ -15,6 +15,7 @@ from spg.completion import (
     list_managed_commands,
     render_shell_function_defs,
     render_zsh_completion,
+    selector_candidates,
 )
 from spg.registry import Registry
 
@@ -364,3 +365,167 @@ def test_completion_no_shell_argument_errors(
     assert rc == 1
     err = capsys.readouterr().err
     assert "supported shells" in err
+
+
+# --- user exclusions --------------------------------------------------------
+
+
+def _fn_project(tmp_path: Path) -> Path:
+    project = tmp_path / "fn"
+    project.mkdir()
+    (project / "spg.toml").write_text(
+        dedent(
+            """\
+            [project]
+            name = "fn"
+
+            [commands.gocd]
+            shell_function = 'cd "$(echo "$@")"'
+
+            [commands.gohome]
+            shell_function = 'cd ~'
+            """
+        )
+    )
+    return project
+
+
+def test_render_shell_function_defs_omits_a_declined_command(
+    isolated_env: dict[str, Path], tmp_path: Path
+) -> None:
+    """The silent leak: a declined shell function must not reach the user's shell.
+
+    This is the one read site that has to parse spg.toml for the function body,
+    so it has to filter the registry entry's exclusions itself.
+    """
+    project = _fn_project(tmp_path)
+    cli.main(["install", "-C", str(project), "--without", "gocd"])
+
+    defs = render_shell_function_defs(_registered(isolated_env))
+    assert "gohome() {" in defs
+    assert "gocd() {" not in defs
+
+
+def test_render_shell_function_defs_returns_after_enable(
+    isolated_env: dict[str, Path], tmp_path: Path
+) -> None:
+    project = _fn_project(tmp_path)
+    cli.main(["install", "-C", str(project), "--without", "gocd"])
+    cli.main(["enable", "-C", str(project), "gocd"])
+    assert "gocd() {" in render_shell_function_defs(_registered(isolated_env))
+
+
+def _selector_project(tmp_path: Path) -> Path:
+    project = tmp_path / "sel"
+    project.mkdir()
+    (project / "scripts").mkdir()
+    (project / "scripts" / "x").write_text("#!/bin/sh\n")
+    (project / "scripts" / "x").chmod(0o755)
+    (project / "shared").write_text("shared\n")
+    (project / "spg.toml").write_text(
+        dedent(
+            f"""\
+            [project]
+            name = "sel"
+
+            [commands.build]
+            run = "./scripts/x"
+            description = "Build it"
+
+            [commands.shared]
+            run = "./scripts/x"
+
+            [links.shared]
+            source = "shared"
+            target = "{tmp_path}/home/shared"
+            description = "The shared file"
+            """
+        )
+    )
+    return project
+
+
+def test_disable_candidates_offer_declared_items(
+    isolated_env: dict[str, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = _selector_project(tmp_path)
+    cli.main(["install", "-C", str(project)])
+    monkeypatch.chdir(project)
+
+    cands = candidates_for_spg(
+        ["spg", "disable", ""], current=3, registry=_registered(isolated_env)
+    )
+    # `build` is unambiguous → bare. `shared` names both a command and a link, so
+    # both arrive prefixed (with the colon escaped for zsh's _describe).
+    assert "build:Build it" in cands
+    assert r"cmd\:shared:(no description)" in cands
+    assert r"link\:shared:The shared file" in cands
+
+
+def test_disable_candidates_skip_already_declined(
+    isolated_env: dict[str, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = _selector_project(tmp_path)
+    cli.main(["install", "-C", str(project), "--without", "build"])
+    monkeypatch.chdir(project)
+    reg = _registered(isolated_env)
+
+    disable_cands = candidates_for_spg(["spg", "disable", ""], current=3, registry=reg)
+    assert not [c for c in disable_cands if c.startswith("build")]
+
+    enable_cands = candidates_for_spg(["spg", "enable", ""], current=3, registry=reg)
+    assert enable_cands == ["build:Build it"]
+
+
+def test_selector_candidates_offered_past_the_first_name(
+    isolated_env: dict[str, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`disable`/`enable` take NAME..., so later words get selectors too."""
+    project = _selector_project(tmp_path)
+    cli.main(["install", "-C", str(project)])
+    monkeypatch.chdir(project)
+
+    cands = candidates_for_spg(
+        ["spg", "disable", "build", ""], current=4, registry=_registered(isolated_env)
+    )
+    assert r"cmd\:shared:(no description)" in cands
+
+
+def test_enable_candidates_include_a_stale_exclusion(
+    isolated_env: dict[str, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A decline the project no longer declares is still completable.
+
+    It is the one thing only `spg enable` can act on, so hiding it from
+    completion would hide the only way to clear it.
+    """
+    project = _selector_project(tmp_path)
+    cli.main(["install", "-C", str(project), "--without", "build"])
+    (project / "spg.toml").write_text(
+        dedent(
+            """\
+            [project]
+            name = "sel"
+
+            [commands.shared]
+            run = "./scripts/x"
+            """
+        )
+    )
+    cli.main(["sync"])
+    monkeypatch.chdir(project)
+
+    cands = candidates_for_spg(["spg", "enable", ""], current=3, registry=_registered(isolated_env))
+    assert cands == ["build:(no longer declared in spg.toml)"]
+
+
+def test_selector_candidates_when_no_project_at_cwd(
+    isolated_env: dict[str, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Completion must never raise, whatever the CWD holds."""
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    monkeypatch.chdir(empty)
+    reg = _registered(isolated_env)
+    assert selector_candidates(reg, excluded=False) == []
+    assert candidates_for_spg(["spg", "disable", ""], current=3, registry=reg) == []

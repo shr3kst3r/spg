@@ -12,6 +12,8 @@ args = [
         "install",
         "uninstall",
         "sync",
+        "disable",
+        "enable",
         "list",
         "help",
         "status",

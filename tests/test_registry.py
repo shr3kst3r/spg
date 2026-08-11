@@ -141,3 +141,80 @@ def test_rejects_malformed_links(registry_file: Path, tmp_path: Path) -> None:
     registry_file.write_text(base + 'links = [{ name = "a" }]\n')
     with pytest.raises(RegistryError, match="need string 'name' and 'path'"):
         Registry.load(registry_file)
+
+
+# --- user exclusions --------------------------------------------------------
+
+
+def test_exclusions_roundtrip(registry_file: Path, tmp_path: Path) -> None:
+    reg = Registry.load(registry_file)
+    reg.upsert(
+        "p",
+        tmp_path,
+        ("kept",),
+        excluded_commands=("declined",),
+        excluded_links=("declined-link",),
+    )
+    reg.save()
+
+    text = registry_file.read_text()
+    assert 'excluded_commands = ["declined"]' in text
+    assert 'excluded_links = ["declined-link"]' in text
+
+    entry = Registry.load(registry_file).projects["p"]
+    assert entry.commands == ("kept",)
+    assert entry.excluded_commands == ("declined",)
+    assert entry.excluded_links == ("declined-link",)
+    assert entry.has_exclusions
+
+
+def test_exclusions_default_to_empty_when_absent(registry_file: Path, tmp_path: Path) -> None:
+    registry_file.write_text(
+        f'[projects.p]\nroot = "{tmp_path}"\ncommands = ["a"]\ninstalled_at = "2024-01-01"\n'
+    )
+    entry = Registry.load(registry_file).projects["p"]
+    assert entry.excluded_commands == ()
+    assert entry.excluded_links == ()
+    assert not entry.has_exclusions
+
+
+def test_registry_without_exclusions_is_byte_identical(registry_file: Path, tmp_path: Path) -> None:
+    """No exclusions must serialize exactly as spg did before they existed.
+
+    The expected text is the pre-change format spelled out literally, so this
+    fails if a new key ever leaks into an exclusion-free registry.
+    """
+    reg = Registry.load(registry_file)
+    root = (tmp_path / "p").resolve()
+    entry = reg.upsert(
+        "p",
+        tmp_path / "p",
+        ("alpha", "beta"),
+        links=(RegistryLink(name="skill", path=tmp_path / "home/.claude/skills/skill"),),
+    )
+    reg.save()
+
+    expected = (
+        "# spg registry — managed file, edit with care\n"
+        f"version = {REGISTRY_VERSION}\n"
+        "\n"
+        "[projects.p]\n"
+        f'root = "{root}"\n'
+        'commands = ["alpha", "beta"]\n'
+        f'links = [{{ name = "skill", path = "{tmp_path / "home/.claude/skills/skill"}" }}]\n'
+        f'installed_at = "{entry.installed_at}"\n'
+        "\n"
+    )
+    assert registry_file.read_text() == expected
+
+
+@pytest.mark.parametrize("key", ["excluded_commands", "excluded_links"])
+def test_rejects_malformed_exclusions(registry_file: Path, tmp_path: Path, key: str) -> None:
+    base = f'[projects.p]\nroot = "{tmp_path}"\ncommands = []\ninstalled_at = "x"\n'
+    registry_file.write_text(base + f'{key} = "nope"\n')
+    with pytest.raises(RegistryError, match=f"{key} must be a list of strings"):
+        Registry.load(registry_file)
+
+    registry_file.write_text(base + f"{key} = [1]\n")
+    with pytest.raises(RegistryError, match=f"{key} must be a list of strings"):
+        Registry.load(registry_file)

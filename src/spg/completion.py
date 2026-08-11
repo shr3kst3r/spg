@@ -8,9 +8,11 @@ from spg.config import (
     Command,
     CommandArg,
     ConfigError,
+    ProjectConfig,
+    display_selector,
     load_project_config,
 )
-from spg.paths import PROJECT_CONFIG_FILENAME
+from spg.paths import PROJECT_CONFIG_FILENAME, find_project_config
 from spg.registry import Registry
 
 SENTINEL_FILES = "__files__"
@@ -25,6 +27,8 @@ SPG_SUBCOMMANDS: tuple[tuple[str, str], ...] = (
     ("install", "Register the current project and write wrappers to ~/bin"),
     ("uninstall", "Remove wrappers and registry entry for a project"),
     ("sync", "Refresh wrappers and links from every registered spg.toml"),
+    ("disable", "Stop installing named commands or links for this project"),
+    ("enable", "Install named commands or links for this project again"),
     ("list", "Show registered projects and their commands"),
     ("help", "List commands exposed via spg, or show usage for one"),
     ("status", "Diagnose registry / ~/bin mismatches"),
@@ -44,6 +48,11 @@ def render_shell_function_defs(registry: Registry) -> str:
 
     Parses each project's spg.toml on demand; silently skips projects whose
     config is missing or malformed (better than blocking shell startup).
+
+    Reads the config directly rather than deriving from the registry entry (it
+    needs the function bodies, which the registry does not store), so it has to
+    filter the entry's declined commands itself — otherwise a declined
+    shell_function would still be sourced into the user's shell.
     """
     chunks: list[str] = []
     for entry in sorted(registry, key=lambda e: e.name):
@@ -52,7 +61,7 @@ def render_shell_function_defs(registry: Registry) -> str:
             project_config = load_project_config(config_file)
         except (ConfigError, OSError):
             continue
-        for cmd in project_config.commands:
+        for cmd in project_config.without(commands=entry.excluded_commands).commands:
             if not cmd.is_shell_function:
                 continue
             chunks.append(f"{cmd.name}() {{\n{cmd.shell_function}\n}}\n")
@@ -80,8 +89,87 @@ def candidates_for_spg(words: list[str], current: int, registry: Registry) -> li
         return sorted(registry.projects.keys())
     if sub == "completion" and current == 3:
         return ["zsh:Print a zsh completion script"]
+    # Both take NAME... , so keep offering selectors past the first one.
+    if sub in ("disable", "enable") and current >= 3:
+        return selector_candidates(registry, excluded=sub == "enable")
 
     return []
+
+
+def selector_candidates(registry: Registry, *, excluded: bool) -> list[str]:
+    """Selectors for the project at the CWD, as completion candidates.
+
+    With `excluded=False` (for `spg disable`) offers everything declared that is
+    not already declined; with `excluded=True` (for `spg enable`) offers what the
+    registry entry records as declined — including a name this spg.toml no longer
+    declares, since clearing one of those is something only `spg enable` can do.
+    Never raises — a completion helper that raises breaks the user's shell, so
+    any failure to find or read a config yields no candidates.
+    """
+    try:
+        config_file = find_project_config(Path.cwd())
+        if config_file is None:
+            return []
+        config = load_project_config(config_file)
+        # Keyed by name, matching how `spg disable`/`spg enable` and the
+        # installer look the project up.
+        entry = registry.projects.get(config.name)
+    except Exception:
+        return []
+
+    stored_commands = entry.excluded_commands if entry else ()
+    stored_links = entry.excluded_links if entry else ()
+    if excluded:
+        command_names: tuple[str, ...] = stored_commands
+        link_names: tuple[str, ...] = stored_links
+    else:
+        command_names = tuple(c.name for c in config.commands if c.name not in stored_commands)
+        link_names = tuple(link.name for link in config.links if link.name not in stored_links)
+
+    # Prefix a selector only when the bare name is ambiguous in the namespaces
+    # the command will resolve against, so the common case stays short.
+    known_commands = {c.name for c in config.commands}
+    known_links = {link.name for link in config.links}
+    if excluded:
+        known_commands |= set(stored_commands)
+        known_links |= set(stored_links)
+    collisions = known_commands & known_links
+
+    out: list[str] = []
+    for name in command_names:
+        value = display_selector("command", name) if name in collisions else name
+        out.append(_describe(value, _command_description(config, name)))
+    for name in link_names:
+        value = display_selector("link", name) if name in collisions else name
+        out.append(_describe(value, _link_description(config, name)))
+    return out
+
+
+_STALE_DESCRIPTION = f"(no longer declared in {PROJECT_CONFIG_FILENAME})"
+
+
+def _command_description(config: ProjectConfig, name: str) -> str:
+    cmd = config.command(name)
+    if cmd is None:
+        return _STALE_DESCRIPTION
+    return cmd.description or "(no description)"
+
+
+def _link_description(config: ProjectConfig, name: str) -> str:
+    link = config.link(name)
+    if link is None:
+        return _STALE_DESCRIPTION
+    return link.description or f"link → {link.link_path}"
+
+
+def _describe(value: str, description: str) -> str:
+    """One `value:description` completion line, escaping colons inside the value.
+
+    zsh's `_describe` splits each line on its first unescaped colon, so a
+    prefixed selector like `cmd:foo` has to arrive as `cmd\\:foo`.
+    """
+    escaped = value.replace(":", r"\:")
+    return f"{escaped}:{description}" if description else escaped
 
 
 def candidates_for_command(
@@ -262,4 +350,5 @@ __all__ = [
     "list_managed_commands",
     "render_shell_function_defs",
     "render_zsh_completion",
+    "selector_candidates",
 ]
