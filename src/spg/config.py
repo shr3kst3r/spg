@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import re
 import tomllib
-from dataclasses import dataclass, field
+from collections.abc import Collection
+from dataclasses import dataclass, field, replace
+from difflib import get_close_matches
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 from spg.paths import PROJECT_CONFIG_FILENAME
 
@@ -98,6 +100,131 @@ class ProjectConfig:
             if link.name == name:
                 return link
         return None
+
+    def without(
+        self,
+        *,
+        commands: Collection[str] = (),
+        links: Collection[str] = (),
+    ) -> ProjectConfig:
+        """Return a copy with the named commands and links dropped.
+
+        `ProjectConfig` is frozen, so this is the sanctioned way to narrow one —
+        it is how a user's declined items are kept out of everything downstream.
+        Names that this project does not declare are ignored: stored exclusions
+        may name something a later spg.toml no longer declares, and that is not
+        an error.
+        """
+        drop_commands = set(commands)
+        drop_links = set(links)
+        if not drop_commands and not drop_links:
+            return self
+        return replace(
+            self,
+            commands=tuple(c for c in self.commands if c.name not in drop_commands),
+            links=tuple(link for link in self.links if link.name not in drop_links),
+        )
+
+
+# Which namespace a selector names. Command names and link names live in
+# separate tables and may collide, so a bare name is not always enough.
+SelectorKind = Literal["command", "link"]
+
+_SELECTOR_PREFIXES: dict[str, SelectorKind] = {"cmd": "command", "link": "link"}
+_KIND_TABLES: dict[SelectorKind, str] = {"command": "commands", "link": "links"}
+
+
+def display_selector(kind: SelectorKind, name: str) -> str:
+    """Render one declarable item the way the user types it: `cmd:x` / `link:y`."""
+    return f"cmd:{name}" if kind == "command" else f"link:{name}"
+
+
+def resolve_selector(
+    config: ProjectConfig,
+    selector: str,
+    *,
+    also_commands: Collection[str] = (),
+    also_links: Collection[str] = (),
+) -> tuple[SelectorKind, str]:
+    """Resolve a user-typed selector to the namespace and name it refers to.
+
+    Accepts `cmd:<name>`, `link:<name>`, or a bare `<name>` when only one
+    namespace declares it. ':' is safe as a separator: neither a command name
+    nor a link name may contain one. Raises `ConfigError` for a typo, an
+    ambiguous bare name, or a malformed selector — a freshly typed selector is
+    rejected loudly, unlike a stored exclusion.
+
+    `also_commands` / `also_links` widen each namespace with names the config
+    does not declare. `spg enable` passes the stored exclusions, so a user can
+    still name (and clear) a decline for something a later spg.toml dropped.
+    """
+    known: dict[SelectorKind, list[str]] = {
+        "command": _known_names([c.name for c in config.commands], also_commands),
+        "link": _known_names([link.name for link in config.links], also_links),
+    }
+    raw = selector.strip()
+    if not raw:
+        raise ConfigError(
+            f"empty selector; name a command or link declared in {config.name}'s "
+            f"{PROJECT_CONFIG_FILENAME} (e.g. 'cmd:build' or 'link:my-skill')"
+        )
+    if ":" in raw:
+        prefix, _, name = raw.partition(":")
+        kind = _SELECTOR_PREFIXES.get(prefix)
+        if kind is None:
+            raise ConfigError(
+                f"invalid selector {selector!r}: unknown prefix {prefix + ':'!r} "
+                "(use 'cmd:<name>', 'link:<name>', or a bare name)"
+            )
+        if not name:
+            raise ConfigError(
+                f"invalid selector {selector!r}: nothing after {prefix + ':'!r} "
+                f"(write '{prefix}:<name>')"
+            )
+        if name in known[kind]:
+            return (kind, name)
+        raise ConfigError(_unknown_selector_message(config.name, known, name, kinds=(kind,)))
+
+    is_command = raw in known["command"]
+    is_link = raw in known["link"]
+    if is_command and is_link:
+        raise ConfigError(
+            f"{raw!r} is ambiguous: {config.name}'s {PROJECT_CONFIG_FILENAME} declares both "
+            f"[commands.{raw}] and [links.{raw}]; write 'cmd:{raw}' or 'link:{raw}'"
+        )
+    if is_command:
+        return ("command", raw)
+    if is_link:
+        return ("link", raw)
+    raise ConfigError(_unknown_selector_message(config.name, known, raw, kinds=("command", "link")))
+
+
+def _known_names(declared: list[str], also: Collection[str]) -> list[str]:
+    """Declared names first, then any extra ones they don't already cover."""
+    return declared + [name for name in dict.fromkeys(also) if name not in declared]
+
+
+def _unknown_selector_message(
+    project: str,
+    known: dict[SelectorKind, list[str]],
+    name: str,
+    *,
+    kinds: tuple[SelectorKind, ...],
+) -> str:
+    tables = " or ".join(f"[{_KIND_TABLES[k]}.{name}]" for k in kinds)
+    message = f"{project}'s {PROJECT_CONFIG_FILENAME} declares no {tables}"
+    pool = [n for kind in kinds for n in known[kind]]
+    suggestions = get_close_matches(name, pool, n=3, cutoff=0.7)
+    if suggestions:
+        seen: list[str] = []
+        for suggestion in suggestions:
+            for kind in kinds:
+                if suggestion in known[kind]:
+                    label = display_selector(kind, suggestion) if len(kinds) > 1 else suggestion
+                    if label not in seen:
+                        seen.append(label)
+        message += "; did you mean: " + ", ".join(seen)
+    return message
 
 
 def load_project_config(config_path: Path) -> ProjectConfig:

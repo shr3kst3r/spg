@@ -10,10 +10,12 @@ import pytest
 
 from spg.config import load_project_config_from_dir
 from spg.installer import (
+    ExclusionChange,
     InstallError,
     install_project,
     list_managed_wrappers,
     prune_orphan_wrappers,
+    sync_project,
     uninstall_project,
 )
 from spg.registry import Registry
@@ -973,3 +975,314 @@ def test_link_write_is_atomic_and_leaves_no_temp_files(
     )
     install_project(load_project_config_from_dir(project), Registry.load(registry_file), bin_dir)
     assert [p.name for p in home.iterdir()] == ["thing"]
+
+
+# --- user exclusions --------------------------------------------------------
+
+
+def excludable_project(make_project, tmp_path: Path, name: str = "demo") -> Path:
+    """A project with two wrapper commands and one link, for decline tests."""
+    home = tmp_path / "home"
+    project = make_project(
+        name,
+        dedent(f"""\
+            [commands.alpha]
+            run = "./scripts/hello.sh"
+            description = "Alpha"
+
+            [commands.beta]
+            run = "./scripts/hello.sh"
+            description = "Beta"
+
+            [links.my-skill]
+            source = "skills/my-skill"
+            target = "{home}/.claude/skills/"
+        """),
+    )
+    skill = project / "skills" / "my-skill"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text("# skill\n")
+    return project
+
+
+def skill_link(tmp_path: Path) -> Path:
+    return tmp_path / "home" / ".claude" / "skills" / "my-skill"
+
+
+def test_install_without_command_writes_no_wrapper(
+    make_project, bin_dir: Path, registry_file: Path, tmp_path: Path
+) -> None:
+    project = excludable_project(make_project, tmp_path)
+    config = load_project_config_from_dir(project)
+    registry = Registry.load(registry_file)
+
+    result = install_project(
+        config,
+        registry,
+        bin_dir,
+        changes=ExclusionChange(disable_commands=("beta",)),
+    )
+    assert result.written == ["alpha"]
+    assert result.excluded == ["cmd:beta"]
+    assert (bin_dir / "alpha").exists()
+    assert not (bin_dir / "beta").exists()
+
+    entry = Registry.load(registry_file).projects["demo"]
+    assert entry.commands == ("alpha",)
+    assert entry.excluded_commands == ("beta",)
+
+
+def test_install_without_link_creates_no_symlink(
+    make_project, bin_dir: Path, registry_file: Path, tmp_path: Path
+) -> None:
+    project = excludable_project(make_project, tmp_path)
+    config = load_project_config_from_dir(project)
+    registry = Registry.load(registry_file)
+
+    result = install_project(
+        config,
+        registry,
+        bin_dir,
+        changes=ExclusionChange(disable_links=("my-skill",)),
+    )
+    assert result.links_written == []
+    assert result.excluded == ["link:my-skill"]
+    assert not skill_link(tmp_path).exists()
+
+    entry = Registry.load(registry_file).projects["demo"]
+    assert entry.links == ()
+    assert entry.excluded_links == ("my-skill",)
+
+
+def test_sync_keeps_an_exclusion(
+    make_project, bin_dir: Path, registry_file: Path, tmp_path: Path
+) -> None:
+    """The regression this whole feature exists for: sync must not undo a decline.
+
+    `sync` re-reads spg.toml and reconciles in both directions, so without
+    persisted exclusions it would recreate the wrapper and the symlink.
+    """
+    project = excludable_project(make_project, tmp_path)
+    config = load_project_config_from_dir(project)
+    registry = Registry.load(registry_file)
+    install_project(
+        config,
+        registry,
+        bin_dir,
+        changes=ExclusionChange(disable_commands=("beta",), disable_links=("my-skill",)),
+    )
+
+    result = sync_project(load_project_config_from_dir(project), registry, bin_dir)
+
+    assert not (bin_dir / "beta").exists()
+    assert not skill_link(tmp_path).exists()
+    assert (bin_dir / "alpha").exists()
+    assert result.excluded == ["cmd:beta", "link:my-skill"]
+    entry = Registry.load(registry_file).projects["demo"]
+    assert entry.commands == ("alpha",)
+    assert entry.excluded_commands == ("beta",)
+    assert entry.excluded_links == ("my-skill",)
+
+
+def test_disable_then_enable_a_command(
+    make_project, bin_dir: Path, registry_file: Path, tmp_path: Path
+) -> None:
+    project = excludable_project(make_project, tmp_path)
+    config = load_project_config_from_dir(project)
+    registry = Registry.load(registry_file)
+    install_project(config, registry, bin_dir)
+    assert (bin_dir / "beta").exists()
+
+    disabled = sync_project(
+        config, registry, bin_dir, changes=ExclusionChange(disable_commands=("beta",))
+    )
+    assert disabled.removed == ["beta"]
+    assert not (bin_dir / "beta").exists()
+
+    enabled = sync_project(
+        config, registry, bin_dir, changes=ExclusionChange(enable_commands=("beta",))
+    )
+    assert enabled.written == ["beta"]
+    assert (bin_dir / "beta").exists()
+    assert enabled.excluded == []
+    assert Registry.load(registry_file).projects["demo"].excluded_commands == ()
+
+
+def test_disable_then_enable_a_link(
+    make_project, bin_dir: Path, registry_file: Path, tmp_path: Path
+) -> None:
+    project = excludable_project(make_project, tmp_path)
+    config = load_project_config_from_dir(project)
+    registry = Registry.load(registry_file)
+    install_project(config, registry, bin_dir)
+    assert skill_link(tmp_path).is_symlink()
+
+    disabled = sync_project(
+        config, registry, bin_dir, changes=ExclusionChange(disable_links=("my-skill",))
+    )
+    assert disabled.links_removed == ["my-skill"]
+    assert not skill_link(tmp_path).exists()
+    assert Registry.load(registry_file).projects["demo"].links == ()
+
+    enabled = sync_project(
+        config, registry, bin_dir, changes=ExclusionChange(enable_links=("my-skill",))
+    )
+    assert enabled.links_written == ["my-skill"]
+    assert skill_link(tmp_path).is_symlink()
+
+
+def test_declined_command_does_not_conflict_with_a_foreign_file(
+    make_project, bin_dir: Path, registry_file: Path, tmp_path: Path
+) -> None:
+    """Declining is the escape hatch for a name that collides with something you own."""
+    project = excludable_project(make_project, tmp_path)
+    (bin_dir / "beta").write_text("#!/bin/sh\n# mine, not spg's\n")
+    config = load_project_config_from_dir(project)
+    registry = Registry.load(registry_file)
+
+    with pytest.raises(InstallError, match="not managed by spg"):
+        install_project(config, registry, bin_dir)
+
+    result = install_project(
+        config, registry, bin_dir, changes=ExclusionChange(disable_commands=("beta",))
+    )
+    assert result.written == ["alpha"]
+    # The user's own file is left exactly as it was.
+    assert (bin_dir / "beta").read_text() == "#!/bin/sh\n# mine, not spg's\n"
+
+
+def test_declined_link_does_not_conflict_with_a_foreign_file(
+    make_project, bin_dir: Path, registry_file: Path, tmp_path: Path
+) -> None:
+    project = excludable_project(make_project, tmp_path)
+    link_path = skill_link(tmp_path)
+    link_path.parent.mkdir(parents=True)
+    link_path.write_text("mine\n")
+    config = load_project_config_from_dir(project)
+    registry = Registry.load(registry_file)
+
+    with pytest.raises(InstallError, match="not managed by spg"):
+        install_project(config, registry, bin_dir)
+
+    install_project(config, registry, bin_dir, changes=ExclusionChange(disable_links=("my-skill",)))
+    assert link_path.read_text() == "mine\n"
+
+
+def test_uninstall_forgets_exclusions(
+    make_project, bin_dir: Path, registry_file: Path, tmp_path: Path
+) -> None:
+    project = excludable_project(make_project, tmp_path)
+    config = load_project_config_from_dir(project)
+    registry = Registry.load(registry_file)
+    install_project(config, registry, bin_dir, changes=ExclusionChange(disable_commands=("beta",)))
+    uninstall_project("demo", registry, bin_dir)
+
+    result = install_project(config, registry, bin_dir)
+    assert result.excluded == []
+    assert (bin_dir / "beta").exists()
+    assert Registry.load(registry_file).projects["demo"].excluded_commands == ()
+
+
+def test_stored_exclusion_for_removed_command_does_not_break_sync(
+    make_project, bin_dir: Path, registry_file: Path, tmp_path: Path
+) -> None:
+    """A stale exclusion is kept, not pruned, and never fails a sync."""
+    project = excludable_project(make_project, tmp_path)
+    config = load_project_config_from_dir(project)
+    registry = Registry.load(registry_file)
+    install_project(config, registry, bin_dir, changes=ExclusionChange(disable_commands=("beta",)))
+
+    # Upstream drops the command the user had declined.
+    (project / "spg.toml").write_text(
+        dedent("""\
+            [project]
+            name = "demo"
+
+            [commands.alpha]
+            run = "./scripts/hello.sh"
+        """)
+    )
+    result = sync_project(load_project_config_from_dir(project), registry, bin_dir)
+    assert result.excluded == ["cmd:beta"]
+    entry = Registry.load(registry_file).projects["demo"]
+    assert entry.commands == ("alpha",)
+    assert entry.excluded_commands == ("beta",)
+
+
+def test_declined_shell_function_leaves_no_wrapper_and_no_registry_entry(
+    tmp_path: Path, bin_dir: Path, registry_file: Path
+) -> None:
+    project = tmp_path / "fn"
+    project.mkdir()
+    (project / "spg.toml").write_text(
+        dedent("""\
+        [project]
+        name = "fn"
+
+        [commands.gocd]
+        shell_function = 'cd .'
+
+        [commands.gohome]
+        shell_function = 'cd ~'
+    """)
+    )
+    config = load_project_config_from_dir(project)
+    registry = Registry.load(registry_file)
+    install_project(config, registry, bin_dir, changes=ExclusionChange(disable_commands=("gocd",)))
+
+    assert not (bin_dir / "gocd").exists()
+    entry = Registry.load(registry_file).projects["fn"]
+    assert entry.commands == ("gohome",)
+    assert entry.excluded_commands == ("gocd",)
+
+
+def test_exclusions_are_sorted_deduped_and_union_then_subtract(
+    make_project, bin_dir: Path, registry_file: Path, tmp_path: Path
+) -> None:
+    project = excludable_project(make_project, tmp_path)
+    config = load_project_config_from_dir(project)
+    registry = Registry.load(registry_file)
+    install_project(
+        config,
+        registry,
+        bin_dir,
+        changes=ExclusionChange(disable_commands=("beta", "beta", "alpha")),
+    )
+    assert Registry.load(registry_file).projects["demo"].excluded_commands == ("alpha", "beta")
+
+    # Union-then-subtract: enabling wins over a stored exclusion in the same call.
+    sync_project(
+        config,
+        registry,
+        bin_dir,
+        changes=ExclusionChange(disable_commands=("beta",), enable_commands=("alpha", "beta")),
+    )
+    assert Registry.load(registry_file).projects["demo"].excluded_commands == ()
+
+
+def test_plain_reinstall_keeps_an_exclusion(
+    make_project, bin_dir: Path, registry_file: Path, tmp_path: Path
+) -> None:
+    """A bare `spg install` re-run must not silently re-enable a decline.
+
+    Nothing in the invocation says "install everything", so the stored set is
+    carried forward exactly as `sync` carries it.
+    """
+    project = excludable_project(make_project, tmp_path)
+    config = load_project_config_from_dir(project)
+    registry = Registry.load(registry_file)
+    install_project(
+        config,
+        registry,
+        bin_dir,
+        changes=ExclusionChange(disable_commands=("beta",), disable_links=("my-skill",)),
+    )
+
+    result = install_project(load_project_config_from_dir(project), registry, bin_dir)
+
+    assert result.excluded == ["cmd:beta", "link:my-skill"]
+    assert not (bin_dir / "beta").exists()
+    assert not skill_link(tmp_path).exists()
+    entry = Registry.load(registry_file).projects["demo"]
+    assert entry.excluded_commands == ("beta",)
+    assert entry.excluded_links == ("my-skill",)
