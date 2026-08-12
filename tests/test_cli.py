@@ -777,3 +777,19 @@ def test_disable_does_not_accept_a_stale_exclusion_name(
 
     assert cli.main(["disable", "-C", str(project), "beta"]) == 1
     assert "declares no [commands.beta]" in capsys.readouterr().err
+
+
+def test_install_honors_spg_invocation_dir(
+    isolated_env, make_project, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When SPG_INVOCATION_DIR is set, `spg install` acts on that directory."""
+    proj_a = make_project("proj_a")
+    proj_b = make_project("proj_b")
+    monkeypatch.chdir(proj_a)
+    monkeypatch.setenv("SPG_INVOCATION_DIR", str(proj_b))
+
+    rc = cli.main(["install"])
+    assert rc == 0
+    reg = Registry.load(isolated_env["registry"])
+    assert "proj_b" in reg.projects
+    assert "proj_a" not in reg.projects

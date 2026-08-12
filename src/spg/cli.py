@@ -47,6 +47,7 @@ from spg.paths import (
     bin_dir,
     find_project_config,
     registry_path,
+    resolve_path,
 )
 from spg.registry import Registry, RegistryEntry
 
@@ -160,7 +161,7 @@ def cli(ctx: click.Context) -> None:
 @click.option("-C", "--dir", "directory", default=".", show_default=True, help="Project directory.")
 def init(name_: str | None, directory: str) -> int:
     """Create a starter spg.toml in the current directory."""
-    target_dir = Path(directory).resolve()
+    target_dir = resolve_path(directory)
     if not target_dir.is_dir():
         _print_error(f"{target_dir} is not a directory")
         return 1
@@ -198,7 +199,7 @@ def install(directory: str, force: bool, without: tuple[str, ...], interactive: 
     """Register the current project and write wrappers to ~/bin."""
     if without and interactive:
         raise click.UsageError("--without and --interactive are mutually exclusive")
-    config = _resolve_config(Path(directory))
+    config = _resolve_config(resolve_path(directory))
     registry = Registry.load(registry_path())
     if interactive:
         # A pre-lock read of the stored exclusions, used *only* to pre-fill the
@@ -245,7 +246,7 @@ def enable(names: tuple[str, ...], directory: str) -> int:
 
 
 def _apply_exclusion_change(directory: str, names: tuple[str, ...], *, enable: bool) -> int:
-    config = _resolve_config(Path(directory))
+    config = _resolve_config(resolve_path(directory))
     registry = Registry.load(registry_path())
     changes = (
         _enable_change(config, names, registry.projects.get(config.name))
@@ -272,7 +273,7 @@ def uninstall(name: str | None, directory: str) -> int:
     registry = Registry.load(registry_path())
     project_name = name
     if project_name is None:
-        config = _resolve_config(Path(directory))
+        config = _resolve_config(resolve_path(directory))
         project_name = config.name
     result = uninstall_project(project_name, registry, bin_dir())
     console.print(f"[bold green]✓[/] Uninstalled [bold cyan]{result.project}[/].")
