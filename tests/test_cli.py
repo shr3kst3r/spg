@@ -493,6 +493,27 @@ def test_disable_and_enable_roundtrip(
     assert "disabled" not in out
 
 
+def test_disable_reports_a_link_path_that_is_no_longer_a_symlink(
+    isolated_env, make_project, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    project = make_project("demo")
+    excludable_config(project, tmp_path / "home")
+    assert cli.main(["install", "-C", str(project)]) == 0
+    link = tmp_path / "home" / ".claude" / "skills" / "my-skill"
+    capsys.readouterr()
+
+    # Someone replaced our symlink with real content.
+    link.unlink()
+    link.write_text("USER DATA\n")
+
+    assert cli.main(["disable", "-C", str(project), "link:my-skill"]) == 0
+    out = capsys.readouterr().out
+    assert "kept links" in out
+    assert "my-skill" in out
+    assert "no longer symlinks" in out
+    assert link.read_text() == "USER DATA\n"
+
+
 def test_a_decline_is_reported_instead_of_no_changes(
     isolated_env, make_project, capsys: pytest.CaptureFixture[str]
 ) -> None:

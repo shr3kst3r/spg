@@ -1131,6 +1131,47 @@ def test_disable_then_enable_a_link(
     assert skill_link(tmp_path).is_symlink()
 
 
+def test_disable_reports_a_link_path_that_is_no_longer_a_symlink(
+    make_project, bin_dir: Path, registry_file: Path, tmp_path: Path
+) -> None:
+    project = excludable_project(make_project, tmp_path)
+    config = load_project_config_from_dir(project)
+    registry = Registry.load(registry_file)
+    install_project(config, registry, bin_dir)
+
+    # Someone replaced our symlink with real content.
+    link = skill_link(tmp_path)
+    link.unlink()
+    link.write_text("USER DATA\n")
+
+    disabled = sync_project(
+        config, registry, bin_dir, changes=ExclusionChange(disable_links=("my-skill",))
+    )
+    assert disabled.links_removed == []
+    assert disabled.links_kept == ["my-skill"]
+    # The user's file survives, and the registry stops publishing the link.
+    assert link.read_text() == "USER DATA\n"
+    assert Registry.load(registry_file).projects["demo"].links == ()
+
+
+def test_undeclared_link_whose_path_is_gone_is_not_reported_as_kept(
+    make_project, bin_dir: Path, registry_file: Path, tmp_path: Path
+) -> None:
+    """Nothing at the path is unremarkable — only foreign content there is news."""
+    project = excludable_project(make_project, tmp_path)
+    config = load_project_config_from_dir(project)
+    registry = Registry.load(registry_file)
+    install_project(config, registry, bin_dir)
+
+    skill_link(tmp_path).unlink()
+
+    disabled = sync_project(
+        config, registry, bin_dir, changes=ExclusionChange(disable_links=("my-skill",))
+    )
+    assert disabled.links_removed == []
+    assert disabled.links_kept == []
+
+
 def test_declined_command_does_not_conflict_with_a_foreign_file(
     make_project, bin_dir: Path, registry_file: Path, tmp_path: Path
 ) -> None:
