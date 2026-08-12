@@ -79,7 +79,9 @@ Data flow: `cli` → `config`/`registry`/`installer`/`completion` → `paths`.
   declaration name for reporting). There's no in-file marker to read back, so
   ownership comes from the registry plus the symlink's current value.
 - **CLI commands return an int exit code** and print errors to stderr with an
-  `spg: ` prefix. `main()` maps `ConfigError`/`InstallError` to exit 1. Route
+  `spg: ` prefix. `main()` maps `ConfigError`/`InstallError`/`RegistryError` to
+  exit 1 — a hand-edited `registry.toml` is as user-facing as a `spg.toml`, so
+  its validation errors get the same treatment, not a traceback. Route
   dynamic error text through `_print_error`/`_print_warning`, not an f-string
   into `err_console.print` — messages contain `[commands.x]`/`[links.x]` table
   names that rich would parse as markup and silently swallow.
