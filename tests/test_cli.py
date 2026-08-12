@@ -388,6 +388,36 @@ def test_config_error_keeps_command_table_name(
     assert "[commands.oops].run must be a string" in capsys.readouterr().err
 
 
+def test_malformed_registry_reports_an_error_instead_of_a_traceback(
+    isolated_env, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A hand-edited registry.toml is a user-facing file: format it like any other error."""
+    isolated_env["registry"].write_text(
+        dedent("""\
+            version = 1
+
+            [projects.demo]
+            root = "/tmp/demo"
+            commands = "not-a-list"
+            installed_at = "2026-08-11T00:00:00+00:00"
+        """)
+    )
+    assert cli.main(["list"]) == 1
+    err = capsys.readouterr().err
+    assert err.startswith("spg: ")
+    assert "projects.demo.commands must be a list of strings" in err
+
+
+def test_registry_from_a_newer_spg_reports_an_error(
+    isolated_env, capsys: pytest.CaptureFixture[str]
+) -> None:
+    isolated_env["registry"].write_text("version = 99999\n")
+    assert cli.main(["status"]) == 1
+    err = capsys.readouterr().err
+    assert err.startswith("spg: ")
+    assert "newer than this spg understands" in err
+
+
 # --- declining commands and links -------------------------------------------
 
 

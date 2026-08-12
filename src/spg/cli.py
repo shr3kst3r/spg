@@ -49,7 +49,7 @@ from spg.paths import (
     registry_path,
     resolve_path,
 )
-from spg.registry import Registry, RegistryEntry
+from spg.registry import Registry, RegistryEntry, RegistryError
 
 STARTER_TEMPLATE = """\
 # spg.toml — describes commands this project exposes to ~/bin via spg.
@@ -673,7 +673,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = list(argv) if argv is not None else None
     try:
         result = cli.main(args=args, prog_name="spg", standalone_mode=False)
-    except (ConfigError, InstallError) as exc:
+    except (ConfigError, InstallError, RegistryError) as exc:
         _print_error(str(exc))
         return 1
     except _click.exceptions.UsageError as exc:
