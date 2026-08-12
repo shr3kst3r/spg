@@ -1014,6 +1014,9 @@ def _print_install_result(result: InstallResult, verb: str = "Installed") -> Non
         _print_change_line("~", "yellow", "relinked", result.links_relinked)
     if result.links_removed:
         _print_change_line("-", "red", "unlinked", result.links_removed)
+    if result.links_kept:
+        _print_change_line("!", "yellow", "kept links", result.links_kept)
+        console.print("  [dim](kept links are no longer symlinks; left untouched)[/]")
     # Report what is declined on every install/sync, so a missing command is
     # explained rather than mysterious.
     if result.excluded:
@@ -1025,6 +1028,7 @@ def _print_install_result(result: InstallResult, verb: str = "Installed") -> Non
         or result.links_written
         or result.links_relinked
         or result.links_removed
+        or result.links_kept
         or result.excluded
     ):
         console.print("  [dim]no changes.[/]")

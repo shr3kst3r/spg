@@ -63,6 +63,10 @@ class InstallResult:
     links_written: list[str] = field(default_factory=list)
     links_relinked: list[str] = field(default_factory=list)
     links_removed: list[str] = field(default_factory=list)
+    # Links we stopped publishing but could not unlink, because the path is no
+    # longer a symlink. Mirrors `UninstallResult.links_skipped`: the user's data
+    # stays put, and we say so instead of quietly dropping the path.
+    links_kept: list[str] = field(default_factory=list)
     # Everything currently declined, as display selectors (`cmd:x`, `link:y`).
     # Reported on every install/sync so a declined item never looks like a bug.
     excluded: list[str] = field(default_factory=list)
@@ -192,8 +196,19 @@ def _install_project_locked(
     # undeclared upstream or declined here.
     declared_link_paths = {link.link_path for link in effective.links}
     links_removed: list[str] = []
+    links_kept: list[str] = []
     for prev_link in previous_entry.links if previous_entry else ():
         if prev_link.path in declared_link_paths:
+            continue
+        st = _lstat_or_none(prev_link.path)
+        if st is None:
+            continue
+        if not stat.S_ISLNK(st.st_mode):
+            # Something replaced our symlink with a real file or directory; leave
+            # it alone rather than deleting data we don't own. We're about to stop
+            # recording this path, so it has to be reported — otherwise spg
+            # forgets a foreign file it knows about without ever mentioning it.
+            links_kept.append(prev_link.name)
             continue
         if _remove_symlink(prev_link.path):
             links_removed.append(prev_link.name)
@@ -216,6 +231,7 @@ def _install_project_locked(
         links_written=links_written,
         links_relinked=links_relinked,
         links_removed=links_removed,
+        links_kept=links_kept,
         excluded=excluded_selectors(excluded_commands, excluded_links),
     )
 
