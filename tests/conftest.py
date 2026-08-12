@@ -6,6 +6,12 @@ from textwrap import dedent
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _clear_spg_invocation_dir(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ensure inherited $SPG_INVOCATION_DIR from outer wrapper does not leak into unit tests."""
+    monkeypatch.delenv("SPG_INVOCATION_DIR", raising=False)
+
+
 @pytest.fixture
 def make_project(tmp_path: Path):
     """Create a fresh project directory with a spg.toml.

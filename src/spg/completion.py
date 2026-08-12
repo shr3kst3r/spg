@@ -12,7 +12,7 @@ from spg.config import (
     display_selector,
     load_project_config,
 )
-from spg.paths import PROJECT_CONFIG_FILENAME, find_project_config
+from spg.paths import PROJECT_CONFIG_FILENAME, find_project_config, invocation_dir
 from spg.registry import Registry
 
 SENTINEL_FILES = "__files__"
@@ -107,7 +107,7 @@ def selector_candidates(registry: Registry, *, excluded: bool) -> list[str]:
     any failure to find or read a config yields no candidates.
     """
     try:
-        config_file = find_project_config(Path.cwd())
+        config_file = find_project_config(invocation_dir())
         if config_file is None:
             return []
         config = load_project_config(config_file)

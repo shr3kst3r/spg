@@ -529,3 +529,20 @@ def test_selector_candidates_when_no_project_at_cwd(
     reg = _registered(isolated_env)
     assert selector_candidates(reg, excluded=False) == []
     assert candidates_for_spg(["spg", "disable", ""], current=3, registry=reg) == []
+
+
+def test_selector_candidates_honors_spg_invocation_dir(
+    isolated_env: dict[str, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Completion candidates respect SPG_INVOCATION_DIR when set."""
+    project = _selector_project(tmp_path)
+    cli.main(["install", "-C", str(project)])
+    other = tmp_path / "other"
+    other.mkdir()
+    monkeypatch.chdir(other)
+    monkeypatch.setenv("SPG_INVOCATION_DIR", str(project))
+
+    cands = candidates_for_spg(
+        ["spg", "disable", ""], current=3, registry=_registered(isolated_env)
+    )
+    assert "build:Build it" in cands
