@@ -49,13 +49,15 @@ it that way (no upward imports):
 | Module | Responsibility |
 | --- | --- |
 | `paths.py` | Filesystem locations: `~/bin`, registry path (`XDG_CONFIG_HOME`), `spg.toml` discovery by walking up from CWD. No dependencies. |
-| `config.py` | Parse & validate `spg.toml` into frozen `ProjectConfig` / `Command` / `CommandArg` / `Link` dataclasses. Raises `ConfigError`. All validation lives here. |
+| `config.py` | Parse & validate `spg.toml` (plus `[project].include`d files) into frozen `ProjectConfig` / `Command` / `CommandArg` / `Link` / `Install` dataclasses. Resolves and cycle-checks `requires`; `ProjectConfig.execution_order()` is the materialization order. Raises `ConfigError`. All validation lives here. |
+| `provision.py` | Probe (`check`/`creates`) and run a single `Install`. Knows nothing of the registry or ordering. |
 | `registry.py` | Read/write `~/.config/spg/registry.toml` (commands + published links, stamped with `REGISTRY_VERSION`). Atomic writes + an exclusive `flock` transaction (`Registry.locked()`). Hand-rolled TOML serialization. |
-| `installer.py` | Materialize/remove `~/bin` wrappers and `[links]` symlinks, detect conflicts, keep the registry in sync. Wrappers carry a `# spg-managed:<project>:<command>` marker. Raises `InstallError`. |
+| `installer.py` | Run installs and materialize/remove `~/bin` wrappers and `[links]` symlinks in `requires` order, skipping what a failed install blocks; detect conflicts; keep the registry in sync. Wrappers carry a `# spg-managed:<project>:<command>` marker. Raises `InstallError` for conflicts; install failures are reported in `InstallResult` instead. |
 | `completion.py` | Generate zsh completion + compute completion candidates for `spg __complete`. Runs per-command `complete_hook`s (2s timeout). |
 | `cli.py` | rich-click command group wiring the above together. Thin — logic belongs in the modules above. |
 
-Data flow: `cli` → `config`/`registry`/`installer`/`completion` → `paths`.
+Data flow: `cli` → `config`/`registry`/`installer`/`completion` → `paths`;
+`installer` → `provision` → `config`.
 
 ## Conventions
 
@@ -89,6 +91,9 @@ Data flow: `cli` → `config`/`registry`/`installer`/`completion` → `paths`.
 
 ## Testing
 
+- `[installs]` run project shell code during `install`/`sync`/`enable` (and
+  their probes during `status`). spg never uninstalls software — don't add a
+  path that does without a new ADR.
 - Tests live in `tests/`, one file per module (`test_config.py`,
   `test_installer.py`, etc.).
 - Use the fixtures in `tests/conftest.py`: `make_project` (builds a temp

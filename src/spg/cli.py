@@ -49,6 +49,7 @@ from spg.paths import (
     registry_path,
     resolve_path,
 )
+from spg.provision import STATUS_CHECK_TIMEOUT, probe
 from spg.registry import Registry, RegistryEntry, RegistryError
 
 STARTER_TEMPLATE = """\
@@ -56,6 +57,9 @@ STARTER_TEMPLATE = """\
 
 [project]
 name = "__SPG_NAME__"
+# Split a big config across files: paths or globs relative to this directory.
+# Included files may declare [commands], [links], and [installs].
+# include = ["spg.d/*.toml"]
 
 # Each [commands.<name>] block becomes either a ~/bin/<name> wrapper (run = ...)
 # or a shell function defined in your interactive shell (shell_function = ...).
@@ -82,6 +86,24 @@ name = "__SPG_NAME__"
 # source = "skills/my-skill"
 # target = "~/.claude/skills/"
 # description = "Publish this repo's skill to Claude Code"
+
+# Each [installs.<name>] block installs something on the machine. `run` is
+# shell; `check` (exits 0 when installed) or `creates` (a path that exists
+# once installed) keeps it from running again. `brew`/`cask` are shorthands.
+# Any item can list what it `requires`; it waits for those, and is skipped if
+# one of them fails.
+#
+# [installs.oh-my-zsh]
+# run = 'RUNZSH=no CHSH=no KEEP_ZSHRC=yes sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)"'
+# creates = "~/.oh-my-zsh"
+#
+# [installs.tools]
+# brew = ["ripgrep", "fd"]
+#
+# [links.zshrc]
+# source = "zsh/zshrc"
+# target = "~/.zshrc"
+# requires = ["oh-my-zsh"]
 """
 
 click.rich_click.TEXT_MARKUP = "ansi"
@@ -186,8 +208,8 @@ def init(name_: str | None, directory: str) -> int:
     "without",
     multiple=True,
     metavar="SELECTOR",
-    help="Don't install this command or link (repeatable). "
-    "Use NAME, or cmd:NAME / link:NAME when both are declared.",
+    help="Don't install this command, link, or install (repeatable). "
+    "Use NAME, or cmd:NAME / link:NAME / install:NAME when names collide.",
 )
 @click.option(
     "-i",
@@ -195,7 +217,18 @@ def init(name_: str | None, directory: str) -> int:
     is_flag=True,
     help="Pick what to install from a checklist (requires a terminal).",
 )
-def install(directory: str, force: bool, without: tuple[str, ...], interactive: bool) -> int:
+@click.option(
+    "--skip-installs",
+    is_flag=True,
+    help="Don't run [installs]; assume they are present.",
+)
+def install(
+    directory: str,
+    force: bool,
+    without: tuple[str, ...],
+    interactive: bool,
+    skip_installs: bool,
+) -> int:
     """Register the current project and write wrappers to ~/bin."""
     if without and interactive:
         raise click.UsageError("--without and --interactive are mutually exclusive")
@@ -212,35 +245,44 @@ def install(directory: str, force: bool, without: tuple[str, ...], interactive: 
             config,
             excluded_commands=entry.excluded_commands if entry else (),
             excluded_links=entry.excluded_links if entry else (),
+            excluded_installs=entry.excluded_installs if entry else (),
         )
     else:
         changes = _disable_change(config, without)
-    result = install_project(config, registry, bin_dir(), force=force, changes=changes)
+    result = install_project(
+        config,
+        registry,
+        bin_dir(),
+        force=force,
+        changes=changes,
+        run_installs=not skip_installs,
+    )
     _print_install_result(result)
-    return 0
+    return 0 if result.ok else 1
 
 
-@cli.command(short_help="Stop installing named commands or links for this project.")
+@cli.command(short_help="Stop installing named commands, links, or installs for this project.")
 @click.argument("names", nargs=-1, required=True, metavar="SELECTOR...")
 @click.option("-C", "--dir", "directory", default=".", show_default=True, help="Project directory.")
 def disable(names: tuple[str, ...], directory: str) -> int:
-    """Stop installing the named commands or links for this project.
+    """Stop installing the named commands, links, or installs for this project.
 
     Removes their wrappers and links now, and records the choice so
-    `spg install` and `spg sync` keep honoring it. Name an item as NAME, or as
-    cmd:NAME / link:NAME when a command and a link share a name.
+    `spg install` and `spg sync` keep honoring it. A declined install is never
+    run (nor uninstalled), and items that require it go ahead without it. Name
+    an item as NAME, or as cmd:NAME / link:NAME / install:NAME when names collide.
     """
     return _apply_exclusion_change(directory, names, enable=False)
 
 
-@cli.command(short_help="Install named commands or links for this project again.")
+@cli.command(short_help="Install named commands, links, or installs for this project again.")
 @click.argument("names", nargs=-1, required=True, metavar="SELECTOR...")
 @click.option("-C", "--dir", "directory", default=".", show_default=True, help="Project directory.")
 def enable(names: tuple[str, ...], directory: str) -> int:
-    """Install the named commands or links for this project again.
+    """Install the named commands, links, or installs for this project again.
 
     Undoes an earlier `spg disable` (or `spg install --without`) and recreates
-    the wrapper or link immediately.
+    the wrapper or link, or runs the install, immediately.
     """
     return _apply_exclusion_change(directory, names, enable=True)
 
@@ -255,7 +297,7 @@ def _apply_exclusion_change(directory: str, names: tuple[str, ...], *, enable: b
     )
     result = sync_project(config, registry, bin_dir(), changes=changes)
     _print_install_result(result, verb="Updated")
-    return 0
+    return 0 if result.ok else 1
 
 
 @cli.command()
@@ -291,8 +333,16 @@ def uninstall(name: str | None, directory: str) -> int:
 
 
 @cli.command(short_help="Refresh wrappers and links from every registered spg.toml.")
-def sync() -> int:
-    """Refresh ~/bin wrappers and links from every registered spg.toml, and prune orphans."""
+@click.option(
+    "--skip-installs",
+    is_flag=True,
+    help="Don't run [installs]; assume they are present.",
+)
+def sync(skip_installs: bool) -> int:
+    """Refresh installs, ~/bin wrappers, and links from every registered spg.toml.
+
+    Also prunes orphaned wrappers.
+    """
     registry = Registry.load(registry_path())
     if not registry.projects:
         console.print("[dim]No projects registered.[/] Run [bold cyan]spg install[/] in a project.")
@@ -314,13 +364,15 @@ def sync() -> int:
             failed_projects.add(entry.name)
             continue
         try:
-            result = sync_project(config, registry, bin_dir())
+            result = sync_project(config, registry, bin_dir(), run_installs=not skip_installs)
         except InstallError as exc:
             _print_warning(f"{entry.name}: {exc}")
             any_failures = True
             failed_projects.add(entry.name)
             continue
         _print_install_result(result, verb="Synced")
+        if not result.ok:
+            any_failures = True
     prune_result = prune_orphan_wrappers(registry, bin_dir(), skip_projects=failed_projects)
     if prune_result.removed:
         console.print("[bold green]✓[/] Pruned orphaned wrappers.")
@@ -450,6 +502,11 @@ def help_(name: str | None) -> int:
         detail.append("  ")
         detail.append(str(cmd.run), style="green")
         detail.append(f"  (from {_short_path(owner.root)})", style="dim")
+    if cmd.requires:
+        detail.append("\n")
+        detail.append("Requires", style="bold")
+        detail.append("  ")
+        detail.append(", ".join(display_selector(*ref) for ref in cmd.requires), style="green")
     if cmd.complete_hook:
         detail.append("\n")
         detail.append("Completion hook", style="bold")
@@ -507,7 +564,11 @@ def status() -> int:
         # Everything below works from the config minus this user's declined
         # items: those are *expected* to be absent, so their absence is not drift.
         project_config = (
-            declared.without(commands=entry.excluded_commands, links=entry.excluded_links)
+            declared.without(
+                commands=entry.excluded_commands,
+                links=entry.excluded_links,
+                installs=entry.excluded_installs,
+            )
             if declared is not None
             else None
         )
@@ -525,6 +586,8 @@ def status() -> int:
                 problems.append(f"missing wrapper: {wrapper_path} (owned by {name})")
 
         problems.extend(_link_problems(name, entry, project_config))
+        if project_config is not None:
+            problems.extend(_install_problems(name, project_config))
 
     for project, found in by_project.items():
         if project not in registered:
@@ -583,6 +646,7 @@ def _stale_exclusion_notes(
         ("command", n) for n in entry.excluded_commands if declared.command(n) is None
     ]
     stale += [("link", n) for n in entry.excluded_links if declared.link(n) is None]
+    stale += [("install", n) for n in entry.excluded_installs if declared.install(n) is None]
     for kind, name in stale:
         selector = display_selector(kind, name)
         notes.append(
@@ -715,27 +779,34 @@ def _resolve_selectors(
     *,
     also_commands: Collection[str] = (),
     also_links: Collection[str] = (),
-) -> tuple[tuple[str, ...], tuple[str, ...]]:
-    """Resolve typed selectors into (command names, link names).
+    also_installs: Collection[str] = (),
+) -> dict[SelectorKind, tuple[str, ...]]:
+    """Resolve typed selectors into names, grouped by namespace.
 
     Raises `ConfigError` on the first bad one — freshly typed selectors are
     rejected loudly, unlike stored exclusions.
     """
-    commands: list[str] = []
-    links: list[str] = []
+    grouped: dict[SelectorKind, list[str]] = {"command": [], "link": [], "install": []}
     for selector in selectors:
         kind, name = resolve_selector(
-            config, selector, also_commands=also_commands, also_links=also_links
+            config,
+            selector,
+            also_commands=also_commands,
+            also_links=also_links,
+            also_installs=also_installs,
         )
-        target = commands if kind == "command" else links
-        if name not in target:
-            target.append(name)
-    return tuple(commands), tuple(links)
+        if name not in grouped[kind]:
+            grouped[kind].append(name)
+    return {kind: tuple(names) for kind, names in grouped.items()}
 
 
 def _disable_change(config: ProjectConfig, selectors: Collection[str]) -> ExclusionChange:
-    commands, links = _resolve_selectors(config, selectors)
-    return ExclusionChange(disable_commands=commands, disable_links=links)
+    names = _resolve_selectors(config, selectors)
+    return ExclusionChange(
+        disable_commands=names["command"],
+        disable_links=names["link"],
+        disable_installs=names["install"],
+    )
 
 
 def _enable_change(
@@ -753,13 +824,18 @@ def _enable_change(
     exclusion set is still computed from the entry the installer reads inside the
     lock, where enabling a name that is no longer stored is simply a no-op.
     """
-    commands, links = _resolve_selectors(
+    names = _resolve_selectors(
         config,
         selectors,
         also_commands=entry.excluded_commands if entry else (),
         also_links=entry.excluded_links if entry else (),
+        also_installs=entry.excluded_installs if entry else (),
     )
-    return ExclusionChange(enable_commands=commands, enable_links=links)
+    return ExclusionChange(
+        enable_commands=names["command"],
+        enable_links=names["link"],
+        enable_installs=names["install"],
+    )
 
 
 def _interactive_select(
@@ -767,6 +843,7 @@ def _interactive_select(
     *,
     excluded_commands: Collection[str],
     excluded_links: Collection[str],
+    excluded_installs: Collection[str] = (),
 ) -> ExclusionChange:
     """Ask which declared items to skip, and turn the answer into a change.
 
@@ -779,18 +856,22 @@ def _interactive_select(
     if not sys.stdin.isatty():
         raise click.UsageError("--interactive requires a terminal; stdin is not a TTY")
 
-    items: list[tuple[SelectorKind, str]] = [("command", c.name) for c in config.commands] + [
-        ("link", link.name) for link in config.links
-    ]
+    items: list[tuple[SelectorKind, str]] = (
+        [("command", c.name) for c in config.commands]
+        + [("link", link.name) for link in config.links]
+        + [("install", i.name) for i in config.installs]
+    )
     if not items:
         console.print(
-            f"[dim]{config.name} declares no commands or links to choose from.[/]",
+            f"[dim]{config.name} declares no commands, links, or installs to choose from.[/]",
         )
         return ExclusionChange()
 
-    already: set[tuple[SelectorKind, str]] = {("command", n) for n in excluded_commands} | {
-        ("link", n) for n in excluded_links
-    }
+    already: set[tuple[SelectorKind, str]] = (
+        {("command", n) for n in excluded_commands}
+        | {("link", n) for n in excluded_links}
+        | {("install", n) for n in excluded_installs}
+    )
 
     table = Table(box=box.SIMPLE_HEAD, header_style="bold", expand=False, pad_edge=False)
     table.add_column("#", style="bold", justify="right", no_wrap=True)
@@ -803,6 +884,14 @@ def _interactive_select(
             cmd = config.command(name)
             detail = Text(cmd.description if cmd and cmd.description else "", style="italic")
             label = Text(name, style="green")
+        elif kind == "install":
+            inst = config.install(name)
+            detail = Text(inst.description if inst and inst.description else "", style="italic")
+            if inst is not None and (inst.brew or inst.cask):
+                if detail.plain:
+                    detail.append("  ")
+                detail.append("brew: " + " ".join(inst.brew + inst.cask), style="dim")
+            label = Text(name, style="blue")
         else:
             link = config.link(name)
             detail = Text(link.description if link and link.description else "", style="italic")
@@ -848,6 +937,8 @@ def _interactive_select(
         disable_links=tuple(name for kind, name in disable if kind == "link"),
         enable_commands=tuple(name for kind, name in enable if kind == "command"),
         enable_links=tuple(name for kind, name in enable if kind == "link"),
+        disable_installs=tuple(name for kind, name in disable if kind == "install"),
+        enable_installs=tuple(name for kind, name in enable if kind == "install"),
     )
 
 
@@ -991,6 +1082,25 @@ def _link_problems(
     return problems
 
 
+def _install_problems(project: str, project_config: ProjectConfig) -> list[str]:
+    """Declared (and not declined) installs whose probe says they are missing."""
+    problems: list[str] = []
+    for inst in project_config.installs:
+        state = probe(inst, project_config.root, timeout=STATUS_CHECK_TIMEOUT)
+        if state == "absent":
+            problems.append(
+                f"install {inst.name!r} is not present (owned by {project}; run `spg install`)"
+            )
+        elif state == "timeout":
+            problems.append(
+                f"install {inst.name!r}: check did not finish within "
+                f"{STATUS_CHECK_TIMEOUT:g}s (owned by {project})"
+            )
+        elif state == "error":
+            problems.append(f"install {inst.name!r}: check could not be run (owned by {project})")
+    return problems
+
+
 def _print_change_line(symbol: str, style: str, label: str, names: list[str]) -> None:
     line = Text()
     line.append("  ")
@@ -1001,7 +1111,12 @@ def _print_change_line(symbol: str, style: str, label: str, names: list[str]) ->
 
 
 def _print_install_result(result: InstallResult, verb: str = "Installed") -> None:
-    console.print(f"[bold green]✓[/] {verb} [bold cyan]{result.project}[/].")
+    if result.ok:
+        console.print(f"[bold green]✓[/] {verb} [bold cyan]{result.project}[/].")
+    else:
+        console.print(f"[bold yellow]![/] {verb} [bold cyan]{result.project}[/] with problems.")
+    if result.installs_installed:
+        _print_change_line("+", "green", "installed", result.installs_installed)
     if result.written:
         _print_change_line("+", "green", "added", result.written)
     if result.refreshed:
@@ -1021,6 +1136,10 @@ def _print_install_result(result: InstallResult, verb: str = "Installed") -> Non
     # explained rather than mysterious.
     if result.excluded:
         _print_change_line("⊘", "dim", "disabled", result.excluded)
+    for name, detail in result.installs_failed.items():
+        _print_warning(f"{result.project}: install:{name} failed: {detail}")
+    for selector, reason in result.skipped.items():
+        _print_warning(f"{result.project}: skipped {selector}: {reason}")
     if not (
         result.written
         or result.refreshed
@@ -1030,6 +1149,8 @@ def _print_install_result(result: InstallResult, verb: str = "Installed") -> Non
         or result.links_removed
         or result.links_kept
         or result.excluded
+        or result.installs_installed
+        or not result.ok
     ):
         console.print("  [dim]no changes.[/]")
 

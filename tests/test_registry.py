@@ -218,3 +218,13 @@ def test_rejects_malformed_exclusions(registry_file: Path, tmp_path: Path, key: 
     registry_file.write_text(base + f"{key} = [1]\n")
     with pytest.raises(RegistryError, match=f"{key} must be a list of strings"):
         Registry.load(registry_file)
+
+
+def test_excluded_installs_roundtrip(registry_file: Path, tmp_path: Path) -> None:
+    reg = Registry.load(registry_file)
+    reg.upsert("p", tmp_path, (), excluded_installs=("brew",))
+    reg.save()
+    assert 'excluded_installs = ["brew"]' in registry_file.read_text()
+    entry = Registry.load(registry_file).projects["p"]
+    assert entry.excluded_installs == ("brew",)
+    assert entry.has_exclusions
