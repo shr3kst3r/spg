@@ -680,8 +680,19 @@ cask = ["wezterm"]
     assert '"$BREW" install ripgrep hashicorp/tap/terraform' in inst.run
     assert '"$BREW" install --cask wezterm' in inst.run
     assert "/opt/homebrew/bin/brew" in inst.run
-    assert 'list --formula "$p"' in inst.check
-    assert 'list --cask "$p"' in inst.check
+    # One `brew list` per kind, every name in a single call — not one per package.
+    assert inst.check.count('"$BREW" list') == 2
+    assert '"$BREW" list --formula ripgrep hashicorp/tap/terraform >/dev/null' in inst.check
+    assert '"$BREW" list --cask wezterm >/dev/null' in inst.check
+    assert "for p in" not in inst.check
+
+
+def test_brew_check_quotes_names_in_the_single_list_call(tmp_path: Path) -> None:
+    write_file(tmp_path, HEADER + '[installs.tools]\nbrew = ["a", "b;c"]\n')
+    inst = load_project_config_from_dir(tmp_path).install("tools")
+    assert inst is not None
+    assert inst.check.count('"$BREW" list --formula') == 1
+    assert "\"$BREW\" list --formula a 'b;c' >/dev/null" in inst.check
 
 
 def test_brew_check_runs_against_a_fake_brew(tmp_path: Path) -> None:
@@ -689,18 +700,46 @@ def test_brew_check_runs_against_a_fake_brew(tmp_path: Path) -> None:
     fake_bin = tmp_path / "fakebin"
     fake_bin.mkdir()
     brew = fake_bin / "brew"
-    brew.write_text('#!/bin/sh\n[ "$1" = list ] && [ "$3" != missing ]\n')
+    calls = tmp_path / "calls"
+    # Like real `brew list`: every name after the flag must be installed, and
+    # a formula is not a cask (and vice versa). Each invocation is logged.
+    brew.write_text(
+        "#!/bin/sh\n"
+        f'echo "$*" >> {calls}\n'
+        '[ "$1" = list ] || exit 2\n'
+        "kind=$2; shift 2\n"
+        'for p in "$@"; do\n'
+        '  case "$kind:$p" in --formula:missing|--cask:missing|--formula:kitty) exit 1;; esac\n'
+        "done\n"
+    )
     brew.chmod(0o755)
     write_file(
         tmp_path,
-        HEADER + '[installs.ok]\nbrew = ["a", "b"]\n[installs.bad]\nbrew = ["a", "missing"]\n',
+        HEADER
+        + '[installs.ok]\nbrew = ["a", "b"]\n'
+        + '[installs.bad]\nbrew = ["a", "missing"]\n'
+        + '[installs.mixed]\nbrew = ["a", "b"]\ncask = ["kitty"]\n'
+        + '[installs.mixed_bad_cask]\nbrew = ["a"]\ncask = ["kitty", "missing"]\n'
+        + '[installs.mixed_bad_formula]\nbrew = ["missing"]\ncask = ["kitty"]\n',
     )
     config = load_project_config_from_dir(tmp_path)
     env = {"PATH": f"{fake_bin}:/usr/bin:/bin"}
-    ok, bad = config.install("ok"), config.install("bad")
-    assert ok is not None and bad is not None
-    assert subprocess.run(["/bin/sh", "-c", ok.check], env=env, check=False).returncode == 0
-    assert subprocess.run(["/bin/sh", "-c", bad.check], env=env, check=False).returncode == 1
+
+    def check(name: str) -> int:
+        inst = config.install(name)
+        assert inst is not None
+        calls.write_text("")
+        return subprocess.run(["/bin/sh", "-c", inst.check], env=env, check=False).returncode
+
+    assert check("ok") == 0
+    assert calls.read_text().splitlines() == ["list --formula a b"]
+    assert check("bad") == 1
+    assert check("mixed") == 0
+    assert calls.read_text().splitlines() == ["list --formula a b", "list --cask kitty"]
+    assert check("mixed_bad_cask") == 1
+    assert check("mixed_bad_formula") == 1
+    # A missing formula short-circuits: the cask list never runs.
+    assert calls.read_text().splitlines() == ["list --formula missing"]
 
 
 @pytest.mark.parametrize(
