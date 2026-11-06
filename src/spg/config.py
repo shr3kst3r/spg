@@ -700,6 +700,10 @@ def _brew_scripts(formulae: tuple[str, ...], casks: tuple[str, ...]) -> tuple[st
     `brew` is located explicitly because right after a fresh Homebrew install
     it is not yet on PATH. `check` passes only when every listed package is
     installed; `run` installs them all (brew skips ones already present).
+
+    `check` is one `brew list` per kind, not one per package: `brew list`
+    takes many names and exits non-zero if any is not installed, and each
+    `brew` process costs ~0.4s of startup, which adds up over a long list.
     """
     run_steps: list[str] = []
     check_steps: list[str] = []
@@ -709,11 +713,9 @@ def _brew_scripts(formulae: tuple[str, ...], casks: tuple[str, ...]) -> tuple[st
         quoted = " ".join(shlex.quote(p) for p in packages)
         install_flag = " --cask" if flag == "--cask" else ""
         run_steps.append(f'"$BREW" install{install_flag} {quoted}')
-        check_steps.append(
-            f'for p in {quoted}; do "$BREW" list {flag} "$p" >/dev/null 2>&1 || exit 1; done'
-        )
+        check_steps.append(f'"$BREW" list {flag} {quoted} >/dev/null 2>&1')
     run = f"{_BREW_LOCATE}; " + " && ".join(run_steps)
-    check = f"{_BREW_LOCATE}; " + "; ".join(check_steps)
+    check = f"{_BREW_LOCATE}; " + " && ".join(check_steps)
     return run, check
 
 
