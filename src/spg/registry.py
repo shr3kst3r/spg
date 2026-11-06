@@ -33,10 +33,12 @@ class RegistryLink:
 class RegistryEntry:
     """What spg installed for one project on this machine, and what it declined.
 
-    `commands` and `links` are what is *actually installed*.
-    `excluded_commands` / `excluded_links` record the declaration names this
-    machine's user declined, which is why those items are absent. They are
-    stored bare (no `cmd:`/`link:` prefix) — the two lists carry the namespace.
+    `commands` and `links` are what is *actually installed*. Installs are not
+    recorded as installed — each install's own probe is the source of truth.
+    `excluded_commands` / `excluded_links` / `excluded_installs` record the
+    declaration names this machine's user declined, which is why those items
+    are absent. They are stored bare (no `cmd:`/`link:`/`install:` prefix) — the
+    lists carry the namespace.
     """
 
     name: str
@@ -46,6 +48,7 @@ class RegistryEntry:
     links: tuple[RegistryLink, ...] = ()
     excluded_commands: tuple[str, ...] = ()
     excluded_links: tuple[str, ...] = ()
+    excluded_installs: tuple[str, ...] = ()
 
     def to_table(self) -> dict[str, Any]:
         table: dict[str, Any] = {
@@ -59,11 +62,13 @@ class RegistryEntry:
             table["excluded_commands"] = list(self.excluded_commands)
         if self.excluded_links:
             table["excluded_links"] = list(self.excluded_links)
+        if self.excluded_installs:
+            table["excluded_installs"] = list(self.excluded_installs)
         return table
 
     @property
     def has_exclusions(self) -> bool:
-        return bool(self.excluded_commands or self.excluded_links)
+        return bool(self.excluded_commands or self.excluded_links or self.excluded_installs)
 
     def link(self, path: Path) -> RegistryLink | None:
         for link in self.links:
@@ -118,6 +123,7 @@ class Registry:
                 links=_parse_links(path, name, body.get("links", [])),
                 excluded_commands=_parse_names(path, name, body, "excluded_commands"),
                 excluded_links=_parse_names(path, name, body, "excluded_links"),
+                excluded_installs=_parse_names(path, name, body, "excluded_installs"),
             )
         return cls(path=path, projects=projects)
 
@@ -158,6 +164,7 @@ class Registry:
         links: tuple[RegistryLink, ...] = (),
         excluded_commands: tuple[str, ...] = (),
         excluded_links: tuple[str, ...] = (),
+        excluded_installs: tuple[str, ...] = (),
     ) -> RegistryEntry:
         entry = RegistryEntry(
             name=name,
@@ -167,6 +174,7 @@ class Registry:
             links=links,
             excluded_commands=excluded_commands,
             excluded_links=excluded_links,
+            excluded_installs=excluded_installs,
         )
         self.projects[name] = entry
         return entry
@@ -248,6 +256,9 @@ def _format_registry(projects: dict[str, RegistryEntry]) -> str:
         if entry.excluded_links:
             excluded_inner = ", ".join(_toml_str(link) for link in entry.excluded_links)
             lines.append(f"excluded_links = [{excluded_inner}]\n")
+        if entry.excluded_installs:
+            excluded_inner = ", ".join(_toml_str(i) for i in entry.excluded_installs)
+            lines.append(f"excluded_installs = [{excluded_inner}]\n")
         lines.append(f"installed_at = {_toml_str(entry.installed_at)}\n")
         lines.append("\n")
     return "".join(lines)

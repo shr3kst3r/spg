@@ -55,6 +55,7 @@ project scripts that implement `complete_hook` callbacks.
 ```toml
 [project]
 name = "my-project"           # required; non-empty string
+include = ["spg.d/*.toml"]    # optional; more files to load (see below)
 
 # One [commands.<name>] table per published command.
 # <name> must match: [A-Za-z_][A-Za-z0-9_.-]*
@@ -91,6 +92,24 @@ target = "~/.claude/skills/"   # required; absolute ('~' expanded).
                                # <name> as the leaf. No trailing '/' → target
                                # is the exact path of the symlink.
 description = "Publish this repo's skill to Claude Code"   # optional
+requires = ["install:oh-my-zsh"]   # optional; any item may set this (see below)
+
+# --- Installs (optional) --------------------------------------------------
+# One [installs.<name>] table per thing to install on the machine.
+# <name> must match: [A-Za-z_][A-Za-z0-9_.-]*
+[installs.oh-my-zsh]
+run = 'RUNZSH=no CHSH=no KEEP_ZSHRC=yes sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)"'
+creates = "~/.oh-my-zsh"      # probe: a path that exists once installed
+description = "zsh framework"  # optional
+
+[installs.uv]
+run = "curl -LsSf https://astral.sh/uv/install.sh | sh"
+check = "test -x ~/.local/bin/uv"   # probe: shell; exit 0 = already installed
+
+[installs.cli-tools]
+brew = ["ripgrep", "fd"]      # shorthand: generates run + check
+cask = ["wezterm"]            # optional; Homebrew casks
+requires = ["homebrew"]       # wait for (and depend on) [installs.homebrew]
 ```
 
 Rules:
@@ -133,10 +152,40 @@ Rules:
   and `shell_function`), the user needs a fresh shell (or to re-source their
   completion script) for the change to take effect. `spg sync` updates the
   registry but cannot reach into already-running shells.
+- `[installs.<name>]` needs `run` plus exactly one probe: `check` (a shell
+  command that exits 0 when the thing is already installed) or `creates` (an
+  absolute path, `~` allowed, that exists once installed). Alternatively set
+  `brew` and/or `cask` (lists of package names), which generate both — they
+  cannot be combined with `run`/`check`/`creates`. spg runs the probe and
+  only runs `run` when it fails, on every `spg install`, `spg sync`, and
+  `spg enable`, so pick a probe that is cheap and exact. After `run`, the probe
+  must pass or the install is reported as failed: if an installer puts a tool
+  somewhere not on `PATH` (uv → `~/.local/bin`, Homebrew → `/opt/homebrew/bin`),
+  probe by absolute path. `run` and `check` execute in the project root with
+  the user's terminal attached, so make installers non-interactive (e.g.
+  oh-my-zsh's `RUNZSH=no CHSH=no KEEP_ZSHRC=yes`). spg never uninstalls.
+- `requires = [...]` is allowed on installs, commands, and links. Entries are
+  selectors — `name`, or `install:name` / `cmd:name` / `link:name` when names
+  collide — for items in this same project. Items materialize after what they
+  require; with no `requires`, installs go first, then commands, then links.
+  If an install fails, everything requiring it (transitively) is skipped and
+  reported, and `spg install` exits 1. Use it whenever an item is broken or
+  harmful without another, e.g. a `.zshrc` link that requires oh-my-zsh (whose
+  installer would otherwise replace `~/.zshrc`), or brew packages that require
+  a Homebrew install. Unknown names, self-references, and cycles are errors.
+- `[project].include` lists paths or globs relative to the project root. Each
+  file may declare `[commands]`, `[links]`, and `[installs]` (not `[project]`
+  or `include`); paths inside them — like a link's `source` — are still
+  relative to the project root. A glob matching nothing is fine; a missing
+  literal path is an error; the same item declared in two files is an error.
+  Reach for it when one file gets unwieldy (e.g. `spg.d/brew.toml`,
+  `spg.d/zsh.toml`).
 - **The end user may decline any individual command or link** (with
   `spg install --without <sel>`, `spg install -i`, or `spg disable <sel>`), and
   the choice persists across `spg sync`. So do not assume everything this
-  `spg.toml` declares is present on a given machine: a command that shells out
+  `spg.toml` declares is present on a given machine (installs can be declined
+  too, as `install:<name>`; a declined install counts as satisfied for
+  `requires`, since the user is managing it themselves): a command that shells out
   to a sibling spg command should handle that command being absent (or call the
   underlying script directly, which is always there). There is no schema field
   for this — a project cannot mark an item optional or pre-decline one on a

@@ -844,3 +844,104 @@ def test_install_honors_spg_invocation_dir(
     reg = Registry.load(isolated_env["registry"])
     assert "proj_b" in reg.projects
     assert "proj_a" not in reg.projects
+
+
+# --- [installs] -------------------------------------------------------------
+
+
+def _installs_project(tmp_path: Path, run: str) -> tuple[Path, Path]:
+    home = tmp_path / "home"
+    home.mkdir()
+    project = tmp_path / "dots"
+    project.mkdir()
+    (project / "zshrc").write_text("# zshrc\n")
+    (project / "spg.toml").write_text(
+        dedent(
+            f"""\
+            [project]
+            name = "dots"
+
+            [installs.omz]
+            run = "{run}"
+            creates = "{home}/.oh-my-zsh"
+
+            [links.zshrc]
+            source = "zshrc"
+            target = "{home}/.zshrc"
+            requires = ["omz"]
+            """
+        )
+    )
+    return project, home
+
+
+def test_install_reports_installs(
+    isolated_env, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    project, home = _installs_project(tmp_path, f"mkdir {tmp_path}/home/.oh-my-zsh")
+    assert cli.main(["install", "-C", str(project)]) == 0
+    out = capsys.readouterr().out
+    assert "installed" in out
+    assert "omz" in out
+    assert (home / ".zshrc").is_symlink()
+
+
+def test_install_exits_1_and_explains_a_failed_install(
+    isolated_env, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    project, home = _installs_project(tmp_path, "exit 2")
+    assert cli.main(["install", "-C", str(project)]) == 1
+    captured = capsys.readouterr()
+    assert "with problems" in captured.out
+    assert "install:omz failed: run exited with status 2" in captured.err
+    assert "skipped link:zshrc: requires install:omz failed" in captured.err
+    assert not (home / ".zshrc").exists()
+
+
+def test_install_skip_installs(isolated_env, tmp_path: Path) -> None:
+    project, home = _installs_project(tmp_path, "exit 2")
+    assert cli.main(["install", "-C", str(project), "--skip-installs"]) == 0
+    assert (home / ".zshrc").is_symlink()
+
+
+def test_sync_exits_1_when_an_install_fails(isolated_env, tmp_path: Path) -> None:
+    project, _ = _installs_project(tmp_path, "exit 2")
+    assert cli.main(["install", "-C", str(project), "--skip-installs"]) == 0
+    assert cli.main(["sync"]) == 1
+    assert cli.main(["sync", "--skip-installs"]) == 0
+
+
+def test_status_reports_a_missing_install(
+    isolated_env, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    project, _ = _installs_project(tmp_path, "exit 2")
+    cli.main(["install", "-C", str(project), "--skip-installs"])
+    capsys.readouterr()
+    assert cli.main(["status"]) == 1
+    assert "install 'omz' is not present" in capsys.readouterr().out
+
+
+def test_disable_and_enable_an_install(
+    isolated_env, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    project, home = _installs_project(tmp_path, "exit 2")
+    assert cli.main(["install", "-C", str(project), "--without", "install:omz"]) == 0
+    assert (home / ".zshrc").is_symlink()
+    # A declined install is expected to be absent: status stays clean.
+    assert cli.main(["status"]) == 0
+    capsys.readouterr()
+    assert cli.main(["enable", "-C", str(project), "omz"]) == 1
+    assert "install:omz failed" in capsys.readouterr().err
+
+
+def test_interactive_lists_installs_after_commands_and_links(
+    isolated_env, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project, _ = _installs_project(tmp_path, "exit 2")
+    config = cli.load_project_config_from_dir(project)
+    monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: True, raising=False)
+    monkeypatch.setattr(cli.click, "prompt", lambda *a, **k: "2")
+    # 1=link:zshrc, 2=install:omz
+    change = cli._interactive_select(config, excluded_commands=(), excluded_links=())
+    assert change.disable_installs == ("omz",)
+    assert change.disable_links == ()

@@ -9,7 +9,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
-from spg.config import Command, Link, ProjectConfig, display_selector
+from spg.config import Command, Install, Link, ProjectConfig, Ref, display_selector
+from spg.provision import ensure
 from spg.registry import Registry, RegistryEntry, RegistryLink
 
 WRAPPER_MARKER = "# spg-managed:"
@@ -49,6 +50,8 @@ class ExclusionChange:
     disable_links: tuple[str, ...] = ()
     enable_commands: tuple[str, ...] = ()
     enable_links: tuple[str, ...] = ()
+    disable_installs: tuple[str, ...] = ()
+    enable_installs: tuple[str, ...] = ()
 
 
 NO_EXCLUSION_CHANGE = ExclusionChange()
@@ -70,6 +73,18 @@ class InstallResult:
     # Everything currently declined, as display selectors (`cmd:x`, `link:y`).
     # Reported on every install/sync so a declined item never looks like a bug.
     excluded: list[str] = field(default_factory=list)
+    # Installs whose `run` ran and now pass their probe.
+    installs_installed: list[str] = field(default_factory=list)
+    # Installs that failed, by name, with why.
+    installs_failed: dict[str, str] = field(default_factory=dict)
+    # Items not materialized because something they `require` failed, as
+    # display selectors, with why. Each keeps whatever state it had before.
+    skipped: dict[str, str] = field(default_factory=dict)
+
+    @property
+    def ok(self) -> bool:
+        """False when anything failed or was skipped — the CLI exits 1."""
+        return not self.installs_failed and not self.skipped
 
 
 def install_project(
@@ -79,8 +94,9 @@ def install_project(
     *,
     force: bool = False,
     changes: ExclusionChange = NO_EXCLUSION_CHANGE,
+    run_installs: bool = True,
 ) -> InstallResult:
-    """Materialize wrappers and links for `config` and update the registry.
+    """Run installs, materialize wrappers and links for `config`, update the registry.
 
     Detects conflicts against:
       - existing non-spg files in bin_dir (error unless force=True)
@@ -97,10 +113,18 @@ def install_project(
     `changes` declines (or re-accepts) individual declared items for this user;
     the resulting exclusions are stored on the registry entry and honored by
     every later install and sync.
+
+    Items are materialized in `requires` order (see
+    `ProjectConfig.execution_order`). An install that fails, and everything
+    that requires it directly or transitively, is reported in the result
+    rather than raised: the rest still installs and the registry is saved.
+    `run_installs=False` skips running installs and treats them as present.
     """
     bin_dir.mkdir(parents=True, exist_ok=True)
     with registry.locked():
-        return _install_project_locked(config, registry, bin_dir, force=force, changes=changes)
+        return _install_project_locked(
+            config, registry, bin_dir, force=force, changes=changes, run_installs=run_installs
+        )
 
 
 def _install_project_locked(
@@ -110,6 +134,7 @@ def _install_project_locked(
     *,
     force: bool,
     changes: ExclusionChange = NO_EXCLUSION_CHANGE,
+    run_installs: bool = True,
 ) -> InstallResult:
     previous_entry = registry.projects.get(config.name)
 
@@ -144,40 +169,87 @@ def _install_project_locked(
         changes.disable_links,
         changes.enable_links,
     )
-    effective = config.without(commands=excluded_commands, links=excluded_links)
-    new_command_names = tuple(c.name for c in effective.commands)
+    excluded_installs = _effective_exclusions(
+        previous_entry.excluded_installs if previous_entry else (),
+        changes.disable_installs,
+        changes.enable_installs,
+    )
+    effective = config.without(
+        commands=excluded_commands, links=excluded_links, installs=excluded_installs
+    )
 
     _check_conflicts(effective, registry, bin_dir, force=force)
 
-    # Commands that still want a ~/bin wrapper after this install.
-    wrapper_command_names = {c.name for c in effective.commands if not c.is_shell_function}
-
     written: list[str] = []
     refreshed: list[str] = []
-    for cmd in effective.commands:
-        if cmd.is_shell_function:
-            continue
-        wrapper_path = bin_dir / cmd.name
-        already_existed = _lstat_or_none(wrapper_path) is not None
-        _write_wrapper(wrapper_path, project=config.name, command=cmd, root=config.root)
-        if already_existed:
-            refreshed.append(cmd.name)
-        else:
-            written.append(cmd.name)
-
     links_written: list[str] = []
     links_relinked: list[str] = []
-    for link in effective.links:
-        link_path = link.link_path
-        source = link.source_path(config.root)
-        state = _link_state(link_path, source)
-        if state == "current":
+    installs_installed: list[str] = []
+    installs_failed: dict[str, str] = {}
+    skipped: dict[str, str] = {}
+    # Items that did not materialize: failed installs plus everything skipped
+    # because of them. A declined dependency is simply absent from `effective`,
+    # so it never lands here — declining means "I handle it myself".
+    unavailable: set[Ref] = set()
+
+    for ref in effective.execution_order():
+        item = effective.item(ref)
+        assert item is not None  # execution_order only yields declared refs
+        blockers = [dep for dep in item.requires if dep in unavailable]
+        if blockers:
+            unavailable.add(ref)
+            reasons = ", ".join(
+                f"{display_selector(*dep)} "
+                + ("failed" if dep[0] == "install" and dep[1] in installs_failed else "was skipped")
+                for dep in blockers
+            )
+            skipped[display_selector(*ref)] = f"requires {reasons}"
             continue
-        _write_symlink(link_path, source)
-        if state == "missing":
-            links_written.append(link.name)
+        if isinstance(item, Install):
+            if not run_installs:
+                continue
+            outcome = ensure(item, config.root)
+            if outcome.status == "installed":
+                installs_installed.append(item.name)
+            elif outcome.status == "failed":
+                installs_failed[item.name] = outcome.detail
+                unavailable.add(ref)
+        elif isinstance(item, Command):
+            if item.is_shell_function:
+                continue
+            wrapper_path = bin_dir / item.name
+            already_existed = _lstat_or_none(wrapper_path) is not None
+            _write_wrapper(wrapper_path, project=config.name, command=item, root=config.root)
+            (refreshed if already_existed else written).append(item.name)
         else:
-            links_relinked.append(link.name)
+            link_path = item.link_path
+            source = item.source_path(config.root)
+            state = _link_state(link_path, source)
+            if state == "current":
+                continue
+            _write_symlink(link_path, source)
+            (links_written if state == "missing" else links_relinked).append(item.name)
+
+    # A skipped item keeps whatever it had: if a previous install recorded it,
+    # it stays recorded (and its wrapper or link stays on disk, unrefreshed);
+    # otherwise it is not recorded at all.
+    previously_linked = {link.path for link in previous_entry.links} if previous_entry else set()
+    recorded_commands = tuple(
+        c.name
+        for c in effective.commands
+        if ("command", c.name) not in unavailable or c.name in previous_commands
+    )
+    recorded_links = tuple(
+        link
+        for link in effective.links
+        if ("link", link.name) not in unavailable or link.link_path in previously_linked
+    )
+    # Commands that still own a ~/bin wrapper after this install.
+    wrapper_command_names = {
+        c.name
+        for c in effective.commands
+        if not c.is_shell_function and c.name in recorded_commands
+    }
 
     removed: list[str] = []
     # Remove any wrappers we previously owned that no longer want one — either
@@ -194,7 +266,7 @@ def _install_project_locked(
 
     # Same for links this project used to publish but no longer wants — either
     # undeclared upstream or declined here.
-    declared_link_paths = {link.link_path for link in effective.links}
+    declared_link_paths = {link.link_path for link in recorded_links}
     links_removed: list[str] = []
     links_kept: list[str] = []
     for prev_link in previous_entry.links if previous_entry else ():
@@ -216,10 +288,11 @@ def _install_project_locked(
     registry.upsert(
         config.name,
         config.root,
-        new_command_names,
-        links=tuple(RegistryLink(name=link.name, path=link.link_path) for link in effective.links),
+        recorded_commands,
+        links=tuple(RegistryLink(name=link.name, path=link.link_path) for link in recorded_links),
         excluded_commands=excluded_commands,
         excluded_links=excluded_links,
+        excluded_installs=excluded_installs,
     )
     registry.save()
 
@@ -232,7 +305,10 @@ def _install_project_locked(
         links_relinked=links_relinked,
         links_removed=links_removed,
         links_kept=links_kept,
-        excluded=excluded_selectors(excluded_commands, excluded_links),
+        excluded=excluded_selectors(excluded_commands, excluded_links, excluded_installs),
+        installs_installed=installs_installed,
+        installs_failed=installs_failed,
+        skipped=skipped,
     )
 
 
@@ -254,17 +330,21 @@ def _effective_exclusions(
 def excluded_selectors(
     excluded_commands: tuple[str, ...],
     excluded_links: tuple[str, ...],
+    excluded_installs: tuple[str, ...] = (),
 ) -> list[str]:
     """Declined items as sorted display selectors, for reporting."""
     return sorted(
         [display_selector("command", name) for name in excluded_commands]
         + [display_selector("link", name) for name in excluded_links]
+        + [display_selector("install", name) for name in excluded_installs]
     )
 
 
 def entry_excluded_selectors(entry: RegistryEntry) -> list[str]:
     """Display selectors for everything a registry entry records as declined."""
-    return excluded_selectors(entry.excluded_commands, entry.excluded_links)
+    return excluded_selectors(
+        entry.excluded_commands, entry.excluded_links, entry.excluded_installs
+    )
 
 
 @dataclass
@@ -613,8 +693,9 @@ def sync_project(
     bin_dir: Path,
     *,
     changes: ExclusionChange = NO_EXCLUSION_CHANGE,
+    run_installs: bool = True,
 ) -> InstallResult:
-    """Refresh wrappers for an already-registered project.
+    """Refresh installs, wrappers, and links for an already-registered project.
 
     Also the entry point for `spg disable` / `spg enable`: it requires the
     project to be registered already and never forces, which is exactly the
@@ -624,7 +705,9 @@ def sync_project(
     with registry.locked():
         if config.name not in registry.projects:
             raise InstallError(f"Project {config.name!r} is not installed; run `spg install` first")
-        return _install_project_locked(config, registry, bin_dir, force=False, changes=changes)
+        return _install_project_locked(
+            config, registry, bin_dir, force=False, changes=changes, run_installs=run_installs
+        )
 
 
 @dataclass

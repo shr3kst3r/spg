@@ -90,6 +90,66 @@ source = "config/ripgreprc"
 target = "~/.config/ripgrep/config"   # no trailing slash: the exact link path
 ```
 
+### Installing software, ordering, and splitting the config
+
+`spg.toml` can also bootstrap a machine. `[installs.<name>]` declares something
+to install, `requires` orders items and keeps one from going ahead without
+another, and `[project].include` splits a big config across files:
+
+```toml
+# spg.toml
+[project]
+name = "dotfiles"
+include = ["spg.d/*.toml"]     # paths or globs, relative to this directory
+
+# spg.d/10-brew.toml
+[installs.homebrew]
+run = '/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"'
+creates = "/opt/homebrew/bin/brew"           # exists once installed
+
+[installs.cli-tools]
+brew = ["ripgrep", "fd", "jq"]               # shorthand: generates run + check
+cask = ["wezterm"]
+requires = ["homebrew"]
+
+[installs.uv]
+run = "curl -LsSf https://astral.sh/uv/install.sh | sh"
+check = "test -x ~/.local/bin/uv"             # exits 0 once installed
+
+# spg.d/20-zsh.toml
+[installs.oh-my-zsh]
+run = 'RUNZSH=no CHSH=no KEEP_ZSHRC=yes sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)"'
+creates = "~/.oh-my-zsh"
+
+[links.zshrc]
+source = "zsh/zshrc"           # still relative to the project root
+target = "~/.zshrc"
+requires = ["oh-my-zsh"]       # linked only once oh-my-zsh is in place
+```
+
+- An install needs `run` plus a probe: `check` (shell; exit 0 means already
+  installed) or `creates` (a path that exists once installed). spg runs the
+  probe first and only runs `run` if needed, so installs are safe on every
+  `spg install` / `spg sync`. After `run`, the probe has to pass. If it still
+  fails (usually because the tool landed somewhere not on `PATH`), the install
+  counts as failed.
+- `brew = [...]` / `cask = [...]` generate both for you. They find `brew` even
+  when a fresh Homebrew isn't on `PATH` yet.
+- `run` and `check` execute with the project root as CWD and your terminal
+  attached.
+- `requires` lists selectors (`name`, `install:name`, `cmd:name`, `link:name`)
+  and works on installs, commands, and links. Items run in dependency order;
+  without `requires`, installs go first, then commands, then links. When an
+  install fails, everything that requires it (directly or indirectly) is
+  skipped and reported, and keeps whatever state it had before. The rest still
+  installs, and the command exits 1. Cycles and unknown names are config
+  errors.
+- spg never uninstalls software. `spg uninstall` removes wrappers and links
+  only.
+- Included files may declare `[commands]`, `[links]`, and `[installs]`, but not
+  `[project]`. A glob that matches nothing is fine. A literal path that doesn't
+  exist is an error, and so is declaring the same item in two files.
+
 Rules in brief:
 
 - Exactly one of `run` or `shell_function` per command.
@@ -125,14 +185,14 @@ authoritative schema and an agent-ready guide to adding `spg` to any project.
 | Command | What it does |
 | --- | --- |
 | `spg init` | Write a starter `spg.toml` in the current directory. |
-| `spg install` | Register the project, write `~/bin` wrappers, and create declared links. |
+| `spg install` | Register the project, run declared installs, write `~/bin` wrappers, and create declared links. `--skip-installs` skips the installs. |
 | `spg uninstall [name]` | Remove a project's wrappers, links, and registry entry. |
-| `spg sync` | Re-read every registered project's `spg.toml`, refresh wrappers and links, and prune orphaned ones. |
-| `spg disable <sel>…` | Stop installing specific commands or links for this project (removes them now). |
-| `spg enable <sel>…` | Install previously disabled commands or links again. |
+| `spg sync` | Re-read every registered project's `spg.toml`, run any missing installs, refresh wrappers and links, and prune orphaned ones. `--skip-installs` skips the installs. |
+| `spg disable <sel>…` | Stop installing specific commands, links, or installs for this project (removes wrappers/links now; never uninstalls software). |
+| `spg enable <sel>…` | Install previously disabled items again. |
 | `spg list` | Show registered projects with their commands, links, and anything disabled. |
 | `spg help [cmd]` | List every published command grouped by project, or show one command's declared usage. |
-| `spg status` | Diagnose registry / `~/bin` / link drift. |
+| `spg status` | Diagnose registry / `~/bin` / link drift, and installs whose probe fails. |
 | `spg completion zsh` | Print the zsh completion script. |
 
 ## Choosing what gets installed
@@ -149,9 +209,12 @@ spg enable deploy                                      # and change it back
 ```
 
 A **selector** names one declarable item: `<name>`, or `cmd:<name>` /
-`link:<name>` when a command and a link share a name. `--without` is repeatable
+`link:<name>` / `install:<name>` when two kinds of item share a name. `--without` is repeatable
 and mutually exclusive with `-i`; `disable`/`enable` take one or more selectors
 and take effect immediately (the wrapper or symlink is removed or recreated).
+
+Declining an install (`--without install:homebrew`) means you manage it
+yourself: spg never runs it, and items that `require` it go ahead anyway.
 
 Declined items are remembered, so `spg sync` won't put them back. `spg list`
 shows them in a `Disabled` column, every install and sync prints a
@@ -172,7 +235,9 @@ of its registry entry, so uninstall/reinstall is not a way to repair an install.
   `XDG_CONFIG_HOME`). It records each project's root, its commands, and the
   links it published, plus a `version` marking the file's format.
 - It also records the commands and links *you* declined for that project
-  (`excluded_commands` / `excluded_links`), which is why they are absent. Every
+  (`excluded_commands` / `excluded_links` / `excluded_installs`), which is why
+  they are absent. Installs themselves are not recorded: each one's probe is
+  the source of truth. Every
   `spg install` and `spg sync` honors them, and only spg writes that file — you
   change what's declined with `--without`, `-i`, `disable`, and `enable`.
 - Wrappers are written to `~/bin/<cmd>`. Each carries a

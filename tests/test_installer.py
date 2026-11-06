@@ -1327,3 +1327,182 @@ def test_plain_reinstall_keeps_an_exclusion(
     entry = Registry.load(registry_file).projects["demo"]
     assert entry.excluded_commands == ("beta",)
     assert entry.excluded_links == ("my-skill",)
+
+
+# --- [installs] and requires -----------------------------------------------
+
+
+@pytest.fixture
+def home(tmp_path: Path) -> Path:
+    path = tmp_path / "home"
+    path.mkdir()
+    return path
+
+
+def make(tmp_path: Path, body: str) -> Path:
+    project = tmp_path / "dots"
+    project.mkdir(exist_ok=True)
+    (project / "zshrc").write_text("# zshrc\n")
+    (project / "spg.toml").write_text('[project]\nname = "dots"\n' + dedent(body))
+    return project
+
+
+def omz_body(home: Path, run: str = "mkdir -p {home}/.oh-my-zsh") -> str:
+    return f"""
+[installs.oh-my-zsh]
+run = "echo omz >> {home}/log; {run.format(home=home)}"
+creates = "{home}/.oh-my-zsh"
+
+[links.zshrc]
+source = "zshrc"
+target = "{home}/.zshrc"
+requires = ["oh-my-zsh"]
+
+[commands.hello]
+run = "true"
+"""
+
+
+def test_install_runs_installs_before_dependent_links(
+    tmp_path: Path, home: Path, bin_dir: Path, registry_file: Path
+) -> None:
+    # The install script fails if .zshrc already exists, so it proves ordering.
+    run = "[ ! -e {home}/.zshrc ] && mkdir -p {home}/.oh-my-zsh"
+    project = make(tmp_path, omz_body(home, run))
+    config = load_project_config_from_dir(project)
+
+    result = install_project(config, Registry.load(registry_file), bin_dir)
+
+    assert result.ok
+    assert result.installs_installed == ["oh-my-zsh"]
+    assert result.links_written == ["zshrc"]
+    assert (home / ".zshrc").is_symlink()
+    assert (home / ".oh-my-zsh").is_dir()
+
+
+def test_present_install_does_not_run_again(
+    tmp_path: Path, home: Path, bin_dir: Path, registry_file: Path
+) -> None:
+    project = make(tmp_path, omz_body(home))
+    config = load_project_config_from_dir(project)
+    registry = Registry.load(registry_file)
+
+    install_project(config, registry, bin_dir)
+    result = sync_project(config, registry, bin_dir)
+
+    assert result.ok
+    assert result.installs_installed == []
+    assert (home / "log").read_text() == "omz\n"
+
+
+def test_failed_install_skips_dependents_but_not_the_rest(
+    tmp_path: Path, home: Path, bin_dir: Path, registry_file: Path
+) -> None:
+    project = make(tmp_path, omz_body(home, "exit 3"))
+    config = load_project_config_from_dir(project)
+    registry = Registry.load(registry_file)
+
+    result = install_project(config, registry, bin_dir)
+
+    assert not result.ok
+    assert result.installs_failed == {"oh-my-zsh": "run exited with status 3"}
+    assert result.skipped == {"link:zshrc": "requires install:oh-my-zsh failed"}
+    assert not (home / ".zshrc").exists()
+    # Unrelated items still install, and the registry is saved for them.
+    assert result.written == ["hello"]
+    entry = Registry.load(registry_file).projects["dots"]
+    assert entry.commands == ("hello",)
+    assert entry.links == ()
+
+
+def test_skips_propagate_transitively(
+    tmp_path: Path, home: Path, bin_dir: Path, registry_file: Path
+) -> None:
+    body = (
+        omz_body(home, "false") + '\n[commands.reload]\nrun = "true"\nrequires = ["link:zshrc"]\n'
+    )
+    config = load_project_config_from_dir(make(tmp_path, body))
+
+    result = install_project(config, Registry.load(registry_file), bin_dir)
+
+    assert result.skipped == {
+        "link:zshrc": "requires install:oh-my-zsh failed",
+        "cmd:reload": "requires link:zshrc was skipped",
+    }
+    assert not (bin_dir / "reload").exists()
+
+
+def test_run_that_succeeds_without_satisfying_the_probe_fails(
+    tmp_path: Path, home: Path, bin_dir: Path, registry_file: Path
+) -> None:
+    config = load_project_config_from_dir(make(tmp_path, omz_body(home, "true")))
+
+    result = install_project(config, Registry.load(registry_file), bin_dir)
+
+    assert "still reports it missing" in result.installs_failed["oh-my-zsh"]
+    assert "link:zshrc" in result.skipped
+
+
+def test_skipped_item_keeps_its_previous_state(
+    tmp_path: Path, home: Path, bin_dir: Path, registry_file: Path
+) -> None:
+    """A later failure must not tear down a link that was installed earlier."""
+    project = make(tmp_path, omz_body(home))
+    registry = Registry.load(registry_file)
+    install_project(load_project_config_from_dir(project), registry, bin_dir)
+    assert (home / ".zshrc").is_symlink()
+
+    # oh-my-zsh disappears and now fails to reinstall.
+    (home / ".oh-my-zsh").rmdir()
+    (project / "spg.toml").write_text('[project]\nname = "dots"\n' + omz_body(home, "false"))
+    result = sync_project(load_project_config_from_dir(project), registry, bin_dir)
+
+    assert "link:zshrc" in result.skipped
+    assert result.links_removed == []
+    assert (home / ".zshrc").is_symlink()
+    entry = Registry.load(registry_file).projects["dots"]
+    assert [link.name for link in entry.links] == ["zshrc"]
+
+
+def test_run_installs_false_assumes_present(
+    tmp_path: Path, home: Path, bin_dir: Path, registry_file: Path
+) -> None:
+    config = load_project_config_from_dir(make(tmp_path, omz_body(home, "false")))
+
+    result = install_project(config, Registry.load(registry_file), bin_dir, run_installs=False)
+
+    assert result.ok
+    assert not (home / "log").exists()
+    assert (home / ".zshrc").is_symlink()
+
+
+def test_declined_install_never_runs_and_does_not_block_dependents(
+    tmp_path: Path, home: Path, bin_dir: Path, registry_file: Path
+) -> None:
+    config = load_project_config_from_dir(make(tmp_path, omz_body(home, "false")))
+
+    result = install_project(
+        config,
+        Registry.load(registry_file),
+        bin_dir,
+        changes=ExclusionChange(disable_installs=("oh-my-zsh",)),
+    )
+
+    assert result.ok
+    assert result.excluded == ["install:oh-my-zsh"]
+    assert not (home / "log").exists()
+    assert (home / ".zshrc").is_symlink()
+    entry = Registry.load(registry_file).projects["dots"]
+    assert entry.excluded_installs == ("oh-my-zsh",)
+
+
+def test_install_runs_with_project_root_as_cwd(
+    tmp_path: Path, bin_dir: Path, registry_file: Path
+) -> None:
+    marker = tmp_path / "cwd"
+    body = f'[installs.where]\nrun = "pwd > {marker}"\ncheck = "test -s {marker}"\n'
+    project = make(tmp_path, body)
+
+    install_project(load_project_config_from_dir(project), Registry.load(registry_file), bin_dir)
+
+    assert Path(marker.read_text().strip()).resolve() == project.resolve()

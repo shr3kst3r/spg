@@ -4,10 +4,11 @@
 
 # ADR index
 
-1 active · 0 superseded
+2 active · 0 superseded
 
 ## Active
 
 | ADR | Title | Status | Components | Ticket | Date |
 | --- | --- | --- | --- | --- | --- |
+| [2026-11-06-installs-requires-and-includes](2026-11-06-installs-requires-and-includes.md) | Let spg.toml declare installs, order items with `requires`, and split across included files | Proposed | config, installer, provision, registry, cli, completion | — | 2026-11-06 |
 | [2026-08-11-user-install-exclusions-in-registry](2026-08-11-user-install-exclusions-in-registry.md) | Record a user's declined commands and links in the spg registry, not in spg.toml | Accepted | registry, installer, cli, completion | shr3kst3r/spg#6 | 2026-08-11 |

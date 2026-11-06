@@ -27,8 +27,8 @@ SPG_SUBCOMMANDS: tuple[tuple[str, str], ...] = (
     ("install", "Register the current project and write wrappers to ~/bin"),
     ("uninstall", "Remove wrappers and registry entry for a project"),
     ("sync", "Refresh wrappers and links from every registered spg.toml"),
-    ("disable", "Stop installing named commands or links for this project"),
-    ("enable", "Install named commands or links for this project again"),
+    ("disable", "Stop installing named commands, links, or installs for this project"),
+    ("enable", "Install named commands, links, or installs for this project again"),
     ("list", "Show registered projects and their commands"),
     ("help", "List commands exposed via spg, or show usage for one"),
     ("status", "Diagnose registry / ~/bin mismatches"),
@@ -119,21 +119,30 @@ def selector_candidates(registry: Registry, *, excluded: bool) -> list[str]:
 
     stored_commands = entry.excluded_commands if entry else ()
     stored_links = entry.excluded_links if entry else ()
+    stored_installs = entry.excluded_installs if entry else ()
     if excluded:
         command_names: tuple[str, ...] = stored_commands
         link_names: tuple[str, ...] = stored_links
+        install_names: tuple[str, ...] = stored_installs
     else:
         command_names = tuple(c.name for c in config.commands if c.name not in stored_commands)
         link_names = tuple(link.name for link in config.links if link.name not in stored_links)
+        install_names = tuple(i.name for i in config.installs if i.name not in stored_installs)
 
     # Prefix a selector only when the bare name is ambiguous in the namespaces
     # the command will resolve against, so the common case stays short.
     known_commands = {c.name for c in config.commands}
     known_links = {link.name for link in config.links}
+    known_installs = {i.name for i in config.installs}
     if excluded:
         known_commands |= set(stored_commands)
         known_links |= set(stored_links)
-    collisions = known_commands & known_links
+        known_installs |= set(stored_installs)
+    collisions = (
+        (known_commands & known_links)
+        | (known_commands & known_installs)
+        | (known_links & known_installs)
+    )
 
     out: list[str] = []
     for name in command_names:
@@ -142,6 +151,9 @@ def selector_candidates(registry: Registry, *, excluded: bool) -> list[str]:
     for name in link_names:
         value = display_selector("link", name) if name in collisions else name
         out.append(_describe(value, _link_description(config, name)))
+    for name in install_names:
+        value = display_selector("install", name) if name in collisions else name
+        out.append(_describe(value, _install_description(config, name)))
     return out
 
 
@@ -160,6 +172,17 @@ def _link_description(config: ProjectConfig, name: str) -> str:
     if link is None:
         return _STALE_DESCRIPTION
     return link.description or f"link → {link.link_path}"
+
+
+def _install_description(config: ProjectConfig, name: str) -> str:
+    inst = config.install(name)
+    if inst is None:
+        return _STALE_DESCRIPTION
+    if inst.description:
+        return inst.description
+    if inst.brew or inst.cask:
+        return "brew install " + " ".join(inst.brew + inst.cask)
+    return "install"
 
 
 def _describe(value: str, description: str) -> str:

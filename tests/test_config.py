@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import subprocess
 from pathlib import Path
 from textwrap import dedent
 
@@ -608,3 +609,355 @@ def test_resolve_selector_also_name_can_be_ambiguous(selector_config) -> None:
 def test_resolve_selector_rejects_unknown_name_despite_also(selector_config) -> None:
     with pytest.raises(ConfigError, match=r"declares no \[commands.typo\]"):
         resolve_selector(selector_config, "typo", also_commands=("gone",))
+
+
+# --- [installs], requires, and [project].include ---------------------------
+
+
+def write_file(directory: Path, body: str, name: str = "spg.toml") -> Path:
+    path = directory / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(dedent(body))
+    return directory
+
+
+HEADER = '[project]\nname = "demo"\n'
+
+
+# --- [installs] -------------------------------------------------------------
+
+
+def test_parses_install_with_check(tmp_path: Path) -> None:
+    write_file(
+        tmp_path,
+        HEADER
+        + """
+[installs.uv]
+run = "curl -LsSf https://astral.sh/uv/install.sh | sh"
+check = "command -v uv"
+description = "Python tooling"
+""",
+    )
+    config = load_project_config_from_dir(tmp_path)
+    inst = config.install("uv")
+    assert inst is not None
+    assert inst.run.startswith("curl")
+    assert inst.check == "command -v uv"
+    assert inst.creates == ""
+    assert inst.description == "Python tooling"
+    assert inst.requires == ()
+
+
+def test_parses_install_with_creates(tmp_path: Path) -> None:
+    write_file(
+        tmp_path,
+        HEADER
+        + """
+[installs.oh-my-zsh]
+run = "./install-omz.sh"
+creates = "~/.oh-my-zsh"
+""",
+    )
+    inst = load_project_config_from_dir(tmp_path).install("oh-my-zsh")
+    assert inst is not None
+    assert inst.creates_path == Path("~/.oh-my-zsh").expanduser()
+
+
+def test_brew_shorthand_generates_run_and_check(tmp_path: Path) -> None:
+    write_file(
+        tmp_path,
+        HEADER
+        + """
+[installs.tools]
+brew = ["ripgrep", "hashicorp/tap/terraform"]
+cask = ["wezterm"]
+""",
+    )
+    inst = load_project_config_from_dir(tmp_path).install("tools")
+    assert inst is not None
+    assert inst.brew == ("ripgrep", "hashicorp/tap/terraform")
+    assert inst.cask == ("wezterm",)
+    assert '"$BREW" install ripgrep hashicorp/tap/terraform' in inst.run
+    assert '"$BREW" install --cask wezterm' in inst.run
+    assert "/opt/homebrew/bin/brew" in inst.run
+    assert 'list --formula "$p"' in inst.check
+    assert 'list --cask "$p"' in inst.check
+
+
+def test_brew_check_runs_against_a_fake_brew(tmp_path: Path) -> None:
+    """The generated shell is valid and its check fails when one package is missing."""
+    fake_bin = tmp_path / "fakebin"
+    fake_bin.mkdir()
+    brew = fake_bin / "brew"
+    brew.write_text('#!/bin/sh\n[ "$1" = list ] && [ "$3" != missing ]\n')
+    brew.chmod(0o755)
+    write_file(
+        tmp_path,
+        HEADER + '[installs.ok]\nbrew = ["a", "b"]\n[installs.bad]\nbrew = ["a", "missing"]\n',
+    )
+    config = load_project_config_from_dir(tmp_path)
+    env = {"PATH": f"{fake_bin}:/usr/bin:/bin"}
+    ok, bad = config.install("ok"), config.install("bad")
+    assert ok is not None and bad is not None
+    assert subprocess.run(["/bin/sh", "-c", ok.check], env=env, check=False).returncode == 0
+    assert subprocess.run(["/bin/sh", "-c", bad.check], env=env, check=False).returncode == 1
+
+
+@pytest.mark.parametrize(
+    ("body", "match"),
+    [
+        ('check = "true"', "must set 'run'"),
+        ('run = "x"', "must set 'check'"),
+        ('run = "x"\ncheck = "true"\ncreates = "/tmp/x"', "cannot set both 'check' and 'creates'"),
+        ('run = "x"\ncreates = "relative/path"', "must be an absolute path"),
+        ('brew = ["rg"]\nrun = "x"', "drop 'run'"),
+        ('brew = ["has space"]', "list of package names"),
+        ('brew = "rg"', "list of package names"),
+        ('run = 1\ncheck = "true"', r"\.run must be a string"),
+        ('run = "x"\ncheck = "true"\nrequires = "uv"', "requires must be a list of strings"),
+    ],
+)
+def test_install_validation_errors(tmp_path: Path, body: str, match: str) -> None:
+    write_file(tmp_path, HEADER + "[installs.thing]\n" + body + "\n")
+    with pytest.raises(ConfigError, match=match) as exc:
+        load_project_config_from_dir(tmp_path)
+    assert "[installs.thing]" in str(exc.value)
+
+
+def test_invalid_install_name(tmp_path: Path) -> None:
+    write_file(tmp_path, HEADER + '[installs."bad name"]\nrun = "x"\ncheck = "true"\n')
+    with pytest.raises(ConfigError, match="invalid install name"):
+        load_project_config_from_dir(tmp_path)
+
+
+def test_invalid_toml_is_a_config_error(tmp_path: Path) -> None:
+    write_file(tmp_path, HEADER + "[commands\n")
+    with pytest.raises(ConfigError, match="invalid TOML"):
+        load_project_config_from_dir(tmp_path)
+
+
+# --- requires & ordering ----------------------------------------------------
+
+ORDERED = (
+    HEADER
+    + """
+[commands.zsh-reload]
+run = "true"
+requires = ["link:zshrc"]
+
+[links.zshrc]
+source = "zshrc"
+target = "/tmp/spg-test/.zshrc"
+requires = ["oh-my-zsh"]
+
+[installs.brew]
+run = "x"
+check = "true"
+
+[installs.tools]
+brew = ["rg"]
+requires = ["install:brew"]
+
+[installs.oh-my-zsh]
+run = "x"
+creates = "/tmp/spg-test/.oh-my-zsh"
+"""
+)
+
+
+def test_requires_resolve_to_refs(tmp_path: Path) -> None:
+    config = load_project_config_from_dir(write_file(tmp_path, ORDERED))
+    tools = config.install("tools")
+    zshrc = config.link("zshrc")
+    reload_cmd = config.command("zsh-reload")
+    assert tools is not None and zshrc is not None and reload_cmd is not None
+    assert tools.requires == (("install", "brew"),)
+    assert zshrc.requires == (("install", "oh-my-zsh"),)
+    assert reload_cmd.requires == (("link", "zshrc"),)
+
+
+def test_execution_order_installs_first_then_requires(tmp_path: Path) -> None:
+    config = load_project_config_from_dir(write_file(tmp_path, ORDERED))
+    order = config.execution_order()
+    assert order == [
+        ("install", "brew"),
+        ("install", "tools"),
+        ("install", "oh-my-zsh"),
+        ("link", "zshrc"),
+        ("command", "zsh-reload"),
+    ]
+
+
+def test_requires_can_pull_a_link_ahead_of_an_install(tmp_path: Path) -> None:
+    """`brew bundle` needs its Brewfile linked first: requires beats the default order."""
+    write_file(
+        tmp_path,
+        HEADER
+        + """
+[installs.bundle]
+run = "brew bundle --global"
+check = "brew bundle check --global"
+requires = ["link:brewfile"]
+
+[links.brewfile]
+source = "Brewfile"
+target = "/tmp/spg-test/.Brewfile"
+""",
+    )
+    order = load_project_config_from_dir(tmp_path).execution_order()
+    assert order == [("link", "brewfile"), ("install", "bundle")]
+
+
+def test_execution_order_ignores_declined_requirements(tmp_path: Path) -> None:
+    config = load_project_config_from_dir(write_file(tmp_path, ORDERED))
+    narrowed = config.without(installs=["oh-my-zsh"])
+    assert ("link", "zshrc") in narrowed.execution_order()
+
+
+def test_requires_unknown_name(tmp_path: Path) -> None:
+    write_file(tmp_path, HEADER + '[installs.a]\nrun = "x"\ncheck = "true"\nrequires = ["bew"]\n')
+    with pytest.raises(ConfigError) as exc:
+        load_project_config_from_dir(tmp_path)
+    message = str(exc.value)
+    assert "[installs.a].requires" in message
+    assert "declares no" in message
+
+
+def test_requires_self(tmp_path: Path) -> None:
+    write_file(tmp_path, HEADER + '[installs.a]\nrun = "x"\ncheck = "true"\nrequires = ["a"]\n')
+    with pytest.raises(ConfigError, match="cannot require itself"):
+        load_project_config_from_dir(tmp_path)
+
+
+def test_requires_cycle_is_named(tmp_path: Path) -> None:
+    write_file(
+        tmp_path,
+        HEADER
+        + """
+[installs.a]
+run = "x"
+check = "true"
+requires = ["cmd:b"]
+
+[commands.b]
+run = "true"
+requires = ["install:a"]
+""",
+    )
+    with pytest.raises(
+        ConfigError, match=re.escape("requires cycle: install:a -> cmd:b -> install:a")
+    ):
+        load_project_config_from_dir(tmp_path)
+
+
+def test_install_selectors(tmp_path: Path) -> None:
+    write_file(
+        tmp_path,
+        HEADER
+        + """
+[installs.uv]
+run = "x"
+check = "true"
+
+[commands.uv]
+run = "true"
+""",
+    )
+    config = load_project_config_from_dir(tmp_path)
+    assert resolve_selector(config, "install:uv") == ("install", "uv")
+    with pytest.raises(ConfigError, match="ambiguous") as exc:
+        resolve_selector(config, "uv")
+    assert "'install:uv'" in str(exc.value)
+
+
+# --- [project].include ------------------------------------------------------
+
+
+def test_include_globs_load_in_sorted_order(tmp_path: Path) -> None:
+    write_file(tmp_path, HEADER + 'include = ["spg.d/*.toml"]\n[commands.root]\nrun = "true"\n')
+    write_file(tmp_path, '[installs.uv]\nrun = "x"\ncheck = "true"\n', "spg.d/20-python.toml")
+    write_file(
+        tmp_path,
+        '[installs.brew]\nrun = "x"\ncheck = "true"\n'
+        '[links.zshrc]\nsource = "zshrc"\ntarget = "/tmp/spg-test/.zshrc"\nrequires = ["uv"]\n',
+        "spg.d/10-shell.toml",
+    )
+    config = load_project_config_from_dir(tmp_path)
+    assert [i.name for i in config.installs] == ["brew", "uv"]
+    assert [c.name for c in config.commands] == ["root"]
+    zshrc = config.link("zshrc")
+    assert zshrc is not None
+    assert zshrc.requires == (("install", "uv"),)  # resolved across files
+    assert [p.name for p in config.included_files] == ["10-shell.toml", "20-python.toml"]
+
+
+def test_include_glob_may_match_nothing(tmp_path: Path) -> None:
+    write_file(tmp_path, HEADER + 'include = ["spg.d/*.toml"]\n')
+    assert load_project_config_from_dir(tmp_path).included_files == ()
+
+
+def test_include_literal_must_exist(tmp_path: Path) -> None:
+    write_file(tmp_path, HEADER + 'include = ["brew.toml"]\n')
+    with pytest.raises(ConfigError, match="is not a file"):
+        load_project_config_from_dir(tmp_path)
+
+
+def test_include_does_not_reload_the_main_file(tmp_path: Path) -> None:
+    write_file(tmp_path, HEADER + 'include = ["*.toml"]\n[commands.a]\nrun = "true"\n')
+    config = load_project_config_from_dir(tmp_path)
+    assert [c.name for c in config.commands] == ["a"]
+
+
+@pytest.mark.parametrize(
+    ("include", "match"),
+    [
+        ('"spg.d/*.toml"', "must be a list of strings"),
+        ('["../other.toml"]', "must not contain '..'"),
+        ('["/etc/x.toml"]', "must be relative"),
+        ('["~/x.toml"]', "must be relative"),
+        ('[""]', "must be non-empty"),
+    ],
+)
+def test_include_validation(tmp_path: Path, include: str, match: str) -> None:
+    write_file(tmp_path, HEADER + f"include = {include}\n")
+    with pytest.raises(ConfigError, match=match):
+        load_project_config_from_dir(tmp_path)
+
+
+def test_included_file_cannot_declare_project(tmp_path: Path) -> None:
+    write_file(tmp_path, HEADER + 'include = ["more.toml"]\n')
+    write_file(tmp_path, '[project]\nname = "other"\n', "more.toml")
+    with pytest.raises(
+        ConfigError, match=r"more\.toml: an included file cannot declare \[project\]"
+    ):
+        load_project_config_from_dir(tmp_path)
+
+
+def test_duplicate_across_files_names_both(tmp_path: Path) -> None:
+    write_file(tmp_path, HEADER + 'include = ["more.toml"]\n[commands.a]\nrun = "true"\n')
+    write_file(tmp_path, '[commands.a]\nrun = "false"\n', "more.toml")
+    with pytest.raises(ConfigError) as exc:
+        load_project_config_from_dir(tmp_path)
+    message = str(exc.value)
+    assert "more.toml: [commands.a] is already declared in" in message
+    assert str(tmp_path / "spg.toml") in message
+
+
+def test_errors_in_an_included_file_name_that_file(tmp_path: Path) -> None:
+    write_file(tmp_path, HEADER + 'include = ["more.toml"]\n')
+    write_file(tmp_path, "[commands.a]\n", "more.toml")
+    with pytest.raises(ConfigError, match=r"more\.toml: \[commands\.a\] must set 'run'"):
+        load_project_config_from_dir(tmp_path)
+
+
+def test_link_sources_in_included_files_are_root_relative(tmp_path: Path) -> None:
+    write_file(tmp_path, HEADER + 'include = ["spg.d/zsh.toml"]\n')
+    write_file(
+        tmp_path,
+        '[links.zshrc]\nsource = "zsh/zshrc"\ntarget = "/tmp/spg-test/.zshrc"\n',
+        "spg.d/zsh.toml",
+    )
+    config = load_project_config_from_dir(tmp_path)
+    zshrc = config.link("zshrc")
+    assert zshrc is not None
+    assert zshrc.source_path(config.root) == tmp_path.resolve() / "zsh/zshrc"

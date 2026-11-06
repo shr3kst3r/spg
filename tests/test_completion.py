@@ -546,3 +546,35 @@ def test_selector_candidates_honors_spg_invocation_dir(
         ["spg", "disable", ""], current=3, registry=_registered(isolated_env)
     )
     assert "build:Build it" in cands
+
+
+def test_selector_candidates_include_installs(
+    isolated_env: dict[str, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = tmp_path / "inst"
+    project.mkdir()
+    (project / "spg.toml").write_text(
+        dedent(
+            """\
+            [project]
+            name = "inst"
+
+            [installs.tools]
+            brew = ["ripgrep"]
+
+            [installs.uv]
+            run = "true"
+            check = "true"
+
+            [commands.uv]
+            run = "true"
+            """
+        )
+    )
+    cli.main(["install", "-C", str(project), "--skip-installs"])
+    monkeypatch.chdir(project)
+
+    cands = selector_candidates(_registered(isolated_env), excluded=False)
+    assert "tools:brew install ripgrep" in cands
+    assert r"install\:uv:install" in cands
+    assert r"cmd\:uv:(no description)" in cands
