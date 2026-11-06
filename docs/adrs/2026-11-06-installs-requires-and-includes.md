@@ -1,6 +1,6 @@
 ---
 id: 2026-11-06-installs-requires-and-includes
-status: Proposed
+status: Accepted
 supersedes: null
 superseded-by: null
 components: [config, installer, provision, registry, cli, completion]
